@@ -54,7 +54,7 @@ static class Cfg
     public const float WindMax = 160;              // logical px per second at full strength
 
     // The sky, behind your windows: stars, and Santa going over now and then
-    public static bool Stars = true;
+    public static bool Stars = false;              // off until you ask for them
     public static bool Santa = false;              // off until you ask for him
     public const float SantaEvery = 300;           // seconds between flights
 
@@ -3240,7 +3240,8 @@ static unsafe class Program
             }
             sb.Append($"piles rebuilt {world.PileChurn}, shaken off by a moving window {world.MoveShakes}\n");
             sb.Append($"wind {Cfg.Wind:0.0}, lights {(Cfg.Lights ? "on" : "off")}, snowballs {(Cfg.Snowballs ? "on" : "off")}, ")
-              .Append($"stars {world.Sky.Count}, Santa {(world.Santa == null ? "not over" : $"at x={world.Santa.X:0}")} ({Sleigh.Runs} so far), ")
+              .Append($"stars {(Cfg.Stars ? world.Sky.Count + " showing" : "off")}, ")
+              .Append($"Santa {(Cfg.Santa ? world.Santa == null ? "not over just now" : $"at x={world.Santa.X:0}" : "off")} ({Sleigh.Runs} so far), ")
               .Append($"start with Windows {(AutoStartOn() ? "yes" : "no")}\n");
             sb.Append($"snow {(paused ? "PAUSED" : "running")}, {world.Flakes.Count} flakes in the air, ")
               .Append(overlayZ == 0
