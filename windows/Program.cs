@@ -2159,6 +2159,7 @@ static unsafe class Program
     static bool clickThrough = true;          // WS_EX_TRANSPARENT currently set?
     static string diagPath;
     static double lastDiag;
+    const int ShotRows = 90;         // how much of the top of the screen --shots keeps
     static string shotDir;
     static double lastShot;
     static int shotNo;
@@ -2324,7 +2325,7 @@ static unsafe class Program
         topAcc += dt;
         if (topAcc >= 1) { topAcc = 0; KeepOnTop(false); }
 
-        if (shotDir != null && shotNo < 14 && now - lastShot > 0.05) { lastShot = now; WriteShot(); }
+        if (shotDir != null && shotNo < 180 && now - lastShot > 0.0) { lastShot = now; WriteShot(); }
 
         if (diagPath != null && now - lastDiag > 2) { lastDiag = now; WriteDiag(); }
     }
@@ -2336,16 +2337,17 @@ static unsafe class Program
         {
             Directory.CreateDirectory(shotDir);
             string path = Path.Combine(shotDir, $"frame{shotNo:00}.bmp");
-            int stride = bw * 4, size = stride * bh;
+            int band = Math.Min(ShotRows, bh);           // only the top of the screen: 320 full frames would be gigabytes
+            int stride = bw * 4, size = stride * band;
             using var fs = new FileStream(path, FileMode.Create);
             using var bwr = new BinaryWriter(fs);
             bwr.Write((byte)'B'); bwr.Write((byte)'M');
             bwr.Write(54 + size); bwr.Write(0); bwr.Write(54);
-            bwr.Write(40); bwr.Write(bw); bwr.Write(bh); bwr.Write((short)1); bwr.Write((short)32);
+            bwr.Write(40); bwr.Write(bw); bwr.Write(band); bwr.Write((short)1); bwr.Write((short)32);
             bwr.Write(0); bwr.Write(size); bwr.Write(2835); bwr.Write(2835); bwr.Write(0); bwr.Write(0);
             var row = new byte[stride];
             uint* px = (uint*)bits;
-            for (int y = bh - 1; y >= 0; y--)          // BMP rows run bottom-up
+            for (int y = band - 1; y >= 0; y--)        // BMP rows run bottom-up
             {
                 for (int x = 0; x < bw; x++)
                 {
