@@ -33,8 +33,11 @@ static class Cfg
     public const int MaxClumps = 900;              // max number of falling snow clumps at once
     public const float FallSpeed = 1.5f;           // falling speed multiplier
     public const bool FlakesInFront = true;        // some of the smallest flakes fall in front of windows
-    public const float InFrontFraction = 0.55f;    // share of the smallest layer that falls in front
+    public const float InFrontFraction = 0.7f;     // share of the smallest layer that falls in front
                                                    // (keeps the sky snowing over a maximised window)
+    public const float OnTopFraction = 0.5f;       // of those, how many settle on the frontmost window
+                                                   // instead of passing over everything to the ground
+    public const float WindowGain = 3.5f;          // snow landing on a window top counts this much more
     public const int FrameMs = 16;                 // timer interval (~60 fps)
     public const float BallStart = 3;              // a new snowball starts this small
     public const float BallMax = 28;               // and stops growing at this size
@@ -62,6 +65,7 @@ sealed class Flake
     public int Layer;                // 0 far, 1 middle, 2 near
     public bool Clump;               // sliding off a surface (affected by gravity)
     public bool InFront;             // falls in front of windows
+    public bool OnTop;               // ...and settles on the frontmost window instead of the ground
     public long IgnoreId = -1;       // don't land right back on the surface it came from
     public float IgnoreUntil;
 }
@@ -282,6 +286,7 @@ sealed class SnowWorld
         f.Layer = li;
         f.Clump = false;
         f.InFront = Cfg.FlakesInFront && li == 0 && Rnd.F(0, 1) < Cfg.InFrontFraction;
+        f.OnTop = f.InFront && Rnd.F(0, 1) < Cfg.OnTopFraction;
         f.IgnoreId = -1;
         f.Size = Rnd.F(L.SizeMin, L.SizeMax);
         f.Vx = 0;
@@ -300,6 +305,7 @@ sealed class SnowWorld
         var f = Obtain();
         f.Clump = true;
         f.InFront = false;
+        f.OnTop = false;
         f.Layer = 2;
         f.Size = Rnd.F(2.5f, 5);
         f.Alpha = 0.95f;
@@ -532,8 +538,14 @@ sealed class SnowWorld
             bool gone = false;
             if (f.Y > prevY)
             {
-                // Window tops, front to back (flakes falling in front of windows skip them)
-                if (!f.InFront)
+                // Window tops. A flake falling behind the windows settles on the first surface it
+                // meets, front to back. A flake falling in front of them either settles on the
+                // frontmost window covering it, or passes over every window down to the ground.
+                //
+                // That first kind is what puts snow on a window that sits over a maximised one: the
+                // maximised window's own snow line catches every flake behind it, so without this a
+                // window in front of it would never collect anything, however far down its edge is.
+                if (!f.InFront || f.OnTop)
                 {
                     foreach (var w in Order)
                     {
@@ -544,10 +556,11 @@ sealed class SnowWorld
                         float s = pile.Surface(c);
                         if (prevY <= s && f.Y > s)
                         {
-                            pile.Add(c, f.Clump ? 1.6f : f.Size * 0.16f);
+                            pile.Add(c, (f.Clump ? 1.6f : f.Size * 0.16f) * (f.OnTop ? Cfg.WindowGain : 1));
                             gone = true;
                             break;
                         }
+                        if (f.OnTop) break;   // never settles on a window behind the frontmost one
                     }
                 }
                 // Then the taskbar / bottom of the screen
