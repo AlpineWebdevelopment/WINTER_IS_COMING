@@ -11,6 +11,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -155,8 +156,15 @@ sealed class Pile
             if (MathF.Abs(d) > 1f)
             {
                 float m = (MathF.Abs(d) - 1f) * 0.3f * MathF.Sign(d);
-                H[i] = Math.Clamp(H[i] - m, 0, Caps[i]);
-                H[i + 1] = Math.Clamp(H[i + 1] + m, 0, Caps[i + 1]);
+                // Move only what the other column can actually take. Clamping each side separately
+                // destroyed snow wherever the neighbour was already at its ceiling, and since the
+                // caps are uneven that happens along every slope: the surface then sank and refilled
+                // frame after frame, and Relax never settled.
+                m = m > 0 ? MathF.Min(m, MathF.Min(H[i], Caps[i + 1] - H[i + 1]))
+                          : -MathF.Min(-m, MathF.Min(H[i + 1], Caps[i] - H[i]));
+                if (MathF.Abs(m) <= 0.0001f) continue;
+                H[i] -= m;
+                H[i + 1] += m;
                 if (MathF.Abs(m) > 0.02f) moved = true;
             }
         }
@@ -320,6 +328,7 @@ sealed class SnowWorld
     public Pile Ground;
     public bool GroundIsTaskbar;
     public int TaskbarZ;             // windows before this index in Order are drawn in front of the taskbar
+    public int PileChurn, MoveShakes;   // piles rebuilt, and piles shaken off because a window moved
     public readonly Dictionary<long, LightString> Lights = new();
     float pollAcc, t;
     public float Time => t;
@@ -583,6 +592,7 @@ sealed class SnowWorld
             }
             else if (pile == null || !known)
             {
+                PileChurn++;
                 if (pile != null) Release(pile, 0, 0, r.Id);
                 Piles[r.Id] = new Pile(r.L, r.T, r.Width, depth);
             }
@@ -590,12 +600,14 @@ sealed class SnowWorld
             {
                 // Width changed, or the window moved near enough to the top edge to change how much
                 // snow fits: drop what's there and start a new pile
+                PileChurn++;
                 Release(pile, 0, 0, r.Id);
                 Piles[r.Id] = new Pile(r.L, r.T, r.Width, depth);
             }
             else if (MathF.Abs(old.L - r.L) > 0.3f || MathF.Abs(old.T - r.T) > 0.3f)
             {
                 // Window dragged: fling the snow off
+                MoveShakes++;
                 float vx = (r.L - old.L) / dt, vy = (r.T - old.T) / dt;
                 pile.MinX = r.L;
                 pile.TopY = r.T;
@@ -1876,6 +1888,44 @@ unsafe static class Render
         }
     }
 
+    static uint[] plowSave = Array.Empty<uint>();
+
+    /// Draw the plough, then put back the pixel columns where a window hangs over the taskbar, so
+    /// it drives behind that window the way the piles and the snowballs already do. Masking every
+    /// drawing primitive would mean threading the mask through all of them; saving and restoring a
+    /// few columns around the truck costs one small buffer and keeps the drawing code plain.
+    static void Plough(uint* buf, int bw, int bh, SnowWorld w, float s)
+    {
+        var p = w.Plow;
+        int x0 = Math.Max(0, (int)MathF.Floor((p.X - 300) * s));
+        int x1 = Math.Min(bw - 1, (int)MathF.Ceiling((p.X + 300) * s));
+        int y0 = Math.Max(0, (int)MathF.Floor((w.Ground.TopY - 95) * s));
+        int y1 = Math.Min(bh - 1, (int)MathF.Ceiling((w.Ground.TopY + 8) * s));
+        if (x1 < x0 || y1 < y0) { PlowTruck(buf, bw, bh, p, w.Ground.TopY, s); return; }
+
+        int cols = x1 - x0 + 1, rows = y1 - y0 + 1;
+        if (plowSave.Length < cols * rows) plowSave = new uint[cols * rows];
+
+        bool any = false;
+        for (int x = x0; x <= x1; x++)
+        {
+            int c = w.Ground.Col((x + 0.5f) / s);
+            if (c < 0 || !w.Ground.Occ[c]) continue;
+            any = true;
+            for (int y = y0; y <= y1; y++) plowSave[(x - x0) * rows + (y - y0)] = buf[(long)y * bw + x];
+        }
+
+        PlowTruck(buf, bw, bh, p, w.Ground.TopY, s);
+        if (!any) return;
+
+        for (int x = x0; x <= x1; x++)
+        {
+            int c = w.Ground.Col((x + 0.5f) / s);
+            if (c < 0 || !w.Ground.Occ[c]) continue;
+            for (int y = y0; y <= y1; y++) buf[(long)y * bw + x] = plowSave[(x - x0) * rows + (y - y0)];
+        }
+    }
+
     static readonly List<Snowball> drawList = new();
 
     public static void World(uint* buf, int bw, int bh, SnowWorld w, float s)
@@ -1902,7 +1952,7 @@ unsafe static class Render
                 if (ball.Dragging && !ball.Hidden) Ball(buf, bw, bh, ball, s);
         }
 
-        if (w.Plow != null) PlowTruck(buf, bw, bh, w.Plow, w.Ground.TopY, s);
+        if (w.Plow != null) Plough(buf, bw, bh, w, s);
 
         foreach (var f in w.Flakes) if (f.Clump || f.Layer == 2) Disc(buf, bw, bh, f.X * s, f.Y * s, f.Size * 1.1f * s, f.Alpha);
     }
@@ -2100,6 +2150,9 @@ static unsafe class Program
     static bool clickThrough = true;          // WS_EX_TRANSPARENT currently set?
     static string diagPath;
     static double lastDiag;
+    static string shotDir;
+    static double lastShot;
+    static int shotNo;
     static readonly List<Win> found = new();
     static int overlayZ;             // how many accepted windows are in front of the overlay
     static int taskbarZ;                      // how many accepted windows are drawn in front of the taskbar
@@ -2112,6 +2165,10 @@ static unsafe class Program
         // Only for working out why the snow is landing somewhere odd; off unless asked for.
         for (int i = 0; i < args.Length - 1; i++)
             if (args[i] == "--diag") diagPath = args[i + 1];
+        // --shots <folder>: save the next few rendered frames as BMPs and stop. This is the overlay's
+        // own output, not a picture of the screen — the way to see what it is actually drawing.
+        for (int i = 0; i < args.Length - 1; i++)
+            if (args[i] == "--shots") shotDir = args[i + 1];
 
         SetProcessDpiAwarenessContext((IntPtr)(-4));   // per-monitor DPI aware v2: real pixel coordinates
         IntPtr inst = GetModuleHandleW(null);
@@ -2258,7 +2315,42 @@ static unsafe class Program
         topAcc += dt;
         if (topAcc >= 1) { topAcc = 0; KeepOnTop(false); }
 
+        if (shotDir != null && shotNo < 14 && now - lastShot > 0.05) { lastShot = now; WriteShot(); }
+
         if (diagPath != null && now - lastDiag > 2) { lastDiag = now; WriteDiag(); }
+    }
+
+    /// Save the frame just rendered as a 32-bit BMP, premultiplied pixels and all
+    static void WriteShot()
+    {
+        try
+        {
+            Directory.CreateDirectory(shotDir);
+            string path = Path.Combine(shotDir, $"frame{shotNo:00}.bmp");
+            int stride = bw * 4, size = stride * bh;
+            using var fs = new FileStream(path, FileMode.Create);
+            using var bwr = new BinaryWriter(fs);
+            bwr.Write((byte)'B'); bwr.Write((byte)'M');
+            bwr.Write(54 + size); bwr.Write(0); bwr.Write(54);
+            bwr.Write(40); bwr.Write(bw); bwr.Write(bh); bwr.Write((short)1); bwr.Write((short)32);
+            bwr.Write(0); bwr.Write(size); bwr.Write(2835); bwr.Write(2835); bwr.Write(0); bwr.Write(0);
+            var row = new byte[stride];
+            uint* px = (uint*)bits;
+            for (int y = bh - 1; y >= 0; y--)          // BMP rows run bottom-up
+            {
+                for (int x = 0; x < bw; x++)
+                {
+                    uint c = px[(long)y * bw + x];
+                    row[x * 4 + 0] = (byte)(c & 0xFF);
+                    row[x * 4 + 1] = (byte)((c >> 8) & 0xFF);
+                    row[x * 4 + 2] = (byte)((c >> 16) & 0xFF);
+                    row[x * 4 + 3] = (byte)(c >> 24);
+                }
+                bwr.Write(row);
+            }
+            shotNo++;
+        }
+        catch { shotDir = null; }
     }
 
     static void WriteDiag()
@@ -2286,6 +2378,7 @@ static unsafe class Program
                   .Append(overTaskbar ? ", hangs over it -> hides its snow" : ", does not hang over it")
                   .Append("  ").Append(pile).Append('\n');
             }
+            sb.Append($"piles rebuilt {world.PileChurn}, shaken off by a moving window {world.MoveShakes}\n");
             sb.Append($"snow {(paused ? "PAUSED" : "running")}, {world.Flakes.Count} flakes in the air, ")
               .Append(overlayZ == 0
                       ? "overlay is in front of every window\n"
