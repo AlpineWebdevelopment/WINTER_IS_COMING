@@ -55,7 +55,7 @@ static class Cfg
 
     // The sky, behind your windows: stars, and Santa going over now and then
     public static bool Stars = true;
-    public static bool Santa = true;
+    public static bool Santa = false;              // off until you ask for him
     public const float SantaEvery = 300;           // seconds between flights
 
     // Fairy lights, hung just under the top edge of every window. Off unless you ask for them.
