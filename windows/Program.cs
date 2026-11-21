@@ -2363,9 +2363,24 @@ unsafe static class Render
 
     // MARK: The Christmas tree
 
-    static readonly float[] treeTiers = { 14, 38, 56,  44, 31, 82,  70, 23, 104,  93, 14, 122 };
-    static readonly float[] baubleAt = { -22, 30, 0,  20, 36, 1,  -14, 60, 2,  16, 66, 0,  -9, 88, 1,  10, 92, 2 };
-    static readonly float[] baubleColour = { 0.88f, 0.16f, 0.18f,  0.95f, 0.76f, 0.22f,  0.30f, 0.55f, 0.92f };
+    // Each tier: how far above the base its bottom edge sits, its half-width, and its apex.
+    static readonly float[] treeTiers = { 18, 41, 64,  48, 34, 90,  75, 25, 112,  98, 16, 131 };
+
+    // Baubles: x across, y above the base, colour.
+    static readonly float[] baubleAt =
+    {
+        -24, 28, 0,   21, 33, 1,   -30, 24, 2,
+        -15, 57, 1,   17, 62, 0,    6, 54, 2,
+        -11, 84, 0,   12, 88, 1,
+    };
+    static readonly float[] baubleColour = { 0.86f, 0.14f, 0.16f,  0.95f, 0.74f, 0.20f,  0.24f, 0.50f, 0.90f };
+
+    // Little lights, the same idea as the ones on the windows but scattered over the branches.
+    static readonly float[] lightAt =
+    {
+        -32, 22,  -18, 36,  4, 30,  26, 26,
+        -22, 50,  -4, 64,  14, 52,  -9, 76,  8, 80,  -3, 100,
+    };
 
     /// A tree standing in the snow wherever you put it. Drawn like the snowman — in front, hidden
     /// only where a window hangs over the taskbar — so it is there whenever the snow is.
@@ -2374,58 +2389,129 @@ unsafe static class Render
         float bx = Cfg.TreeX * w.W, by = w.Ground.TopY + 3;
         float light = w.Ground.BgLight;
         float o = MathF.Max(0.7f, 0.5f * s);
+        float X(float lx) => (bx + lx) * s;
+        float Y(float ly) => (by - ly) * s;
 
-        // trunk
-        GradBox(buf, bw, bh, (bx - 6) * s, (bx + 6) * s, (by - 18) * s, by * s, 2f * s,
-                0.42f, 0.28f, 0.16f, 0.28f, 0.18f, 0.10f, 1);
+        // a shadow in the snow, so it is standing in it rather than on it
+        GradBox(buf, bw, bh, X(-30), X(30), Y(4), Y(-3), 4f * s,
+                0.05f, 0.07f, 0.12f, 0.05f, 0.07f, 0.12f, 0.18f);
 
-        // tiers, bottom first so each one overlaps the one below
+        // trunk, with a couple of bark lines
+        GradBox(buf, bw, bh, X(-7.5f) - o, X(7.5f) + o, Y(22) - o, Y(-1) + o, 2.5f * s + o,
+                0.14f, 0.09f, 0.05f, 0.14f, 0.09f, 0.05f, 0.9f);
+        GradBox(buf, bw, bh, X(-7.5f), X(7.5f), Y(22), Y(-1), 2.5f * s,
+                0.49f, 0.33f, 0.19f, 0.26f, 0.16f, 0.09f, 1);
+        FillSegment(buf, bw, bh, X(-3.5f), Y(20), X(-3.5f), Y(3), 0.7f * s, 0.33f, 0.21f, 0.12f, 1);
+        FillSegment(buf, bw, bh, X(2.5f), Y(18), X(2.5f), Y(2), 0.6f * s, 0.33f, 0.21f, 0.12f, 1);
+
         for (int i = 0; i < 4; i++)
         {
-            float yb = by - treeTiers[i * 3], hw = treeTiers[i * 3 + 1], yt = by - treeTiers[i * 3 + 2];
-            pvx[0] = (bx - hw) * s; pvy[0] = yb * s;
-            pvx[1] = bx * s; pvy[1] = yt * s;
-            pvx[2] = (bx + hw) * s; pvy[2] = yb * s;
-            GradPoly(buf, bw, bh, pvx, pvy, 3, 1.6f * s + o, 0.03f, 0.14f, 0.07f, 0.03f, 0.14f, 0.07f, 0.85f);
-            GradPoly(buf, bw, bh, pvx, pvy, 3, 1.6f * s,
-                     0.16f, 0.52f, 0.26f, 0.07f, 0.31f, 0.15f, 1);
+            float yb = treeTiers[i * 3], hw = treeTiers[i * 3 + 1], yt = treeTiers[i * 3 + 2];
 
-            // snow settled along the branch tips: overlapping blobs, so they run together into a
+            // branch tips first, so the body covers where they join: they are what stops the
+            // silhouette being a plain triangle
+            int tips = 7 + i;
+            for (int j = 0; j <= tips; j++)
+            {
+                float t = j / (float)tips * 2 - 1;                 // -1 .. 1 across the tier
+                float px = hw * t * 0.97f;
+                float drop = 4.5f + 3.5f * (1 - MathF.Abs(t)) + MathF.Sin(j * 2.3f + hw) * 1.3f;
+                float wide = 5.5f + MathF.Cos(j * 1.7f) * 1.2f;
+                pvx[0] = X(px - wide); pvy[0] = Y(yb + 2f);
+                pvx[1] = X(px + wide); pvy[1] = Y(yb + 2f);
+                pvx[2] = X(px + MathF.Sign(t) * 3f); pvy[2] = Y(yb - drop);
+                GradPoly(buf, bw, bh, pvx, pvy, 3, 1.9f * s,
+                         0.11f, 0.35f, 0.18f, 0.05f, 0.20f, 0.10f, 1);
+            }
+
+            // the body, in two halves so the light can come from one side
+            for (int side = 0; side < 2; side++)
+            {
+                float sx = side == 0 ? -1 : 1;
+                pvx[0] = X(0); pvy[0] = Y(yt);
+                pvx[1] = X(hw * sx); pvy[1] = Y(yb);
+                pvx[2] = X(0); pvy[2] = Y(yb);
+                if (side == 0)
+                    GradPoly(buf, bw, bh, pvx, pvy, 3, 1.4f * s + o, 0.03f, 0.13f, 0.07f, 0.03f, 0.13f, 0.07f, 0.85f);
+                GradPoly(buf, bw, bh, pvx, pvy, 3, 1.4f * s,
+                         side == 0 ? 0.20f : 0.17f, side == 0 ? 0.56f : 0.49f, side == 0 ? 0.29f : 0.26f,
+                         side == 0 ? 0.10f : 0.08f, side == 0 ? 0.34f : 0.29f, side == 0 ? 0.17f : 0.15f, 1);
+            }
+
+            // needles: short strokes fanning down and out from the trunk line
+            float span = yb - yt;
+            for (int j = 1; j <= 9; j++)
+            {
+                float f = j / 10f;
+                float y = yt + span * f;
+                float half = hw * f;
+                for (int side = 0; side < 2; side++)
+                {
+                    float sx = side == 0 ? -1 : 1;
+                    bool pale = (j + side) % 2 == 0;
+                    float r0 = pale ? 0.26f : 0.07f, g0 = pale ? 0.66f : 0.30f, b0 = pale ? 0.35f : 0.15f;
+                    FillSegment(buf, bw, bh, X(sx * half * 0.08f), Y(y + 0.6f), X(sx * half * 0.96f), Y(y - 4.2f),
+                                0.8f * s, r0, g0, b0, 0.65f);
+                }
+            }
+
+            // snow lying along the branch tips: overlapping blobs, so they run together into a
             // scalloped band rather than reading as a row of white beads
-            float span = hw * 1.88f;
-            int n = Math.Max(6, (int)(span / 3.2f));
+            float bandW = hw * 1.94f;
+            int n = Math.Max(7, (int)(bandW / 3.1f));
             for (int j = 0; j <= n; j++)
             {
                 float t = j / (float)n;
-                float x = bx - span * 0.5f + span * t;
+                float px = -bandW * 0.5f + bandW * t;
                 float edge = MathF.Abs(t - 0.5f) * 2;
-                float r = 3.3f - edge * 1.4f + MathF.Sin(t * 19f + hw) * 0.35f;
-                FillCircle(buf, bw, bh, x * s, (yb - r * 0.35f) * s, r * s,
-                           1f, 1f - 0.02f * light, 1f - 0.06f * light, 0.96f);
+                float r = 3.5f - edge * 1.5f + MathF.Sin(t * 21f + hw) * 0.4f;
+                FillCircle(buf, bw, bh, X(px), Y(yb - r * 0.25f), (r + 0.5f) * s,
+                           0.62f, 0.68f, 0.78f, 0.35f);                        // the shade under it
+                FillCircle(buf, bw, bh, X(px), Y(yb + r * 0.3f), r * s,
+                           1f, 1f - 0.02f * light, 1f - 0.06f * light, 0.97f);
             }
         }
 
-        // baubles
+        // lights tucked among the branches
+        for (int i = 0; i < lightAt.Length; i += 2)
+        {
+            float x = lightAt[i], y = lightAt[i + 1];
+            Glow(buf, bw, bh, X(x), Y(y), 7f * s, 1f, 0.90f, 0.58f, 0.5f);
+            FillCircle(buf, bw, bh, X(x), Y(y), 1.5f * s, 1f, 0.96f, 0.80f, 1);
+        }
+
+        // baubles, each on its little hook
         for (int i = 0; i < baubleAt.Length; i += 3)
         {
             int c = (int)baubleAt[i + 2] * 3;
-            float x = bx + baubleAt[i], y = by - baubleAt[i + 1];
-            FillCircle(buf, bw, bh, x * s, y * s, 3.4f * s,
-                       baubleColour[c], baubleColour[c + 1], baubleColour[c + 2], 1);
-            FillCircle(buf, bw, bh, (x - 1) * s, (y - 1.1f) * s, 1.1f * s, 1f, 1f, 1f, 0.55f);
+            float x = baubleAt[i], y = baubleAt[i + 1];
+            FillSegment(buf, bw, bh, X(x), Y(y + 5.6f), X(x), Y(y + 3.4f), 0.6f * s, 0.72f, 0.74f, 0.78f, 1);
+            FillCircle(buf, bw, bh, X(x), Y(y), 4.1f * s, 0.06f, 0.05f, 0.05f, 0.55f);
+            FillCircle(buf, bw, bh, X(x), Y(y), 3.5f * s, baubleColour[c], baubleColour[c + 1], baubleColour[c + 2], 1);
+            FillCircle(buf, bw, bh, X(x + 1.1f), Y(y - 1.1f), 2.1f * s,
+                       baubleColour[c] * 0.55f, baubleColour[c + 1] * 0.55f, baubleColour[c + 2] * 0.55f, 0.55f);
+            FillCircle(buf, bw, bh, X(x - 1.1f), Y(y + 1.2f), 1.1f * s, 1f, 1f, 1f, 0.8f);
         }
 
         // the star on top
-        float sx = bx, sy = by - 130;
-        Glow(buf, bw, bh, sx * s, sy * s, 16 * s, 1f, 0.88f, 0.42f, 0.42f);
-        for (int i = 0; i < 5; i++)
-        {
-            float a = -MathF.PI / 2 + i * 1.2566f;
-            FillSegment(buf, bw, bh, sx * s, sy * s,
-                        (sx + MathF.Cos(a) * 8.5f) * s, (sy + MathF.Sin(a) * 8.5f) * s,
-                        1.5f * s, 1f, 0.84f, 0.26f, 1);
-        }
-        FillCircle(buf, bw, bh, sx * s, sy * s, 3.4f * s, 1f, 0.93f, 0.60f, 1);
+        float sy = treeTiers[11] + 9;
+        Glow(buf, bw, bh, X(0), Y(sy), 20f * s, 1f, 0.86f, 0.38f, 0.5f);
+        for (int pass = 0; pass < 2; pass++)
+            for (int i = 0; i < 5; i++)
+            {
+                float a = -MathF.PI / 2 + i * 1.2566f;
+                float len = pass == 0 ? 10.2f : 9f;
+                FillSegment(buf, bw, bh, X(0), Y(sy), X(MathF.Cos(a) * len), Y(sy - MathF.Sin(a) * len),
+                            (pass == 0 ? 2.2f : 1.6f) * s,
+                            pass == 0 ? 0.52f : 1f, pass == 0 ? 0.36f : 0.84f, pass == 0 ? 0.05f : 0.24f, 1);
+            }
+        FillCircle(buf, bw, bh, X(0), Y(sy), 3.6f * s, 1f, 0.92f, 0.56f, 1);
+        FillCircle(buf, bw, bh, X(-1.1f), Y(sy + 1.1f), 1.5f * s, 1f, 1f, 0.90f, 0.9f);
+
+        // snow heaped around the foot
+        for (int i = -3; i <= 3; i++)
+            FillCircle(buf, bw, bh, X(i * 6.5f), Y(1.5f - MathF.Abs(i) * 0.5f), (6.5f - MathF.Abs(i) * 1.1f) * s,
+                       1f, 1f - 0.02f * light, 1f - 0.06f * light, 0.95f);
     }
 
     static readonly List<Snowball> drawList = new();
