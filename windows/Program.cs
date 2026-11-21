@@ -1400,6 +1400,14 @@ unsafe static class Render
 
         float rimDepth = MathF.Max(2.2f, 3.0f * s);   // how deep the cool edge reaches, in screen pixels
 
+        // Snow in shadow is blue, and against a dark desktop that is exactly right. Against a white
+        // page the same blue reads as a blue smear rather than as snow, so the deeper the colour
+        // goes the more neutral it gets as the background brightens.
+        float lightBg = p.BgLight;
+        float fadeR = 0.26f - 0.11f * lightBg;
+        float fadeG = 0.19f - 0.06f * lightBg;
+        float fadeB = 0.07f + 0.04f * lightBg;
+
         // The line the snow rests on, in screen pixels. Flat along the window's top edge and
         // curving away at the corners, so the snow wraps the corner instead of overhanging it.
         float Base(float px)
@@ -1450,7 +1458,8 @@ unsafe static class Render
             for (int y = Math.Max(0, (int)MathF.Floor(baseY)); y < Math.Min(bh, (int)MathF.Ceiling(shEnd)); y++)
             {
                 float cov = MathF.Min(1, shEnd - y);
-                Blend(buf + (long)y * bw + px, 0.9f * cov, 0.70f, 0.78f, 0.92f);
+                Blend(buf + (long)y * bw + px, (0.9f - 0.1f * lightBg) * cov,
+                      0.70f - 0.08f * lightBg, 0.78f - 0.12f * lightBg, 0.92f - 0.25f * lightBg);
             }
             int yTop = (int)MathF.Floor(top);
             float invH = 1f / MathF.Max(1f, h);
@@ -1462,14 +1471,14 @@ unsafe static class Render
                 // the slope only lights the crust; deeper down every column is the same, or the
                 // differences between neighbouring columns would read as stripes
                 float m = 1 - (1 - shade) * Math.Clamp(1 - v * 2.2f, 0, 1);
-                float sr = (1 - 0.26f * t) * m, sg = (1 - 0.19f * t) * m, sb = (1 - 0.07f * t) * m;
+                float sr = (1 - fadeR * t) * m, sg = (1 - fadeG * t) * m, sb = (1 - fadeB * t) * m;
                 // A cool rim along the very top, but only where it is needed. White snow on a white
                 // window is invisible — nothing draws the edge and the mound disappears — while on a
                 // dark desktop the snow should stay plain white. So the host samples what is behind
                 // each pile and sets BgLight, and the rim fades in only over a light background.
                 float rim = Math.Clamp(1 - (y + 0.5f - top) / rimDepth, 0, 1) * 0.95f * p.BgLight;
                 Blend(buf + (long)y * bw + px, 0.97f * cov,
-                      sr + (0.46f - sr) * rim, sg + (0.56f - sg) * rim, sb + (0.76f - sb) * rim);
+                      sr + (0.55f - sr) * rim, sg + (0.58f - sg) * rim, sb + (0.64f - sb) * rim);
             }
         }
 
