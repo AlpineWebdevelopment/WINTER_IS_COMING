@@ -59,7 +59,7 @@ cd WINTER_IS_COMING/windows
 dotnet run -c Release
 ```
 
-**Left-click the ❄ icon** near the clock to stop and start the snow, or press **Ctrl+Alt+S** from anywhere. Right-click it for the rest: the snow amount, wind, snowballs, the snowplough, fairy lights, clearing the snow and quitting. If you can't see the ❄, it's under the **^** arrow in the tray — drag it out onto the taskbar and it stays there.
+**Left-click the ❄ icon** near the clock and a little panel opens with everything in it: the switch, the snow amount, the wind, snowballs, fairy lights, the snowplough and whether it starts with Windows. **Ctrl+Alt+S** stops and starts the snow from anywhere without opening anything, and right-clicking the icon still gives you the plain menu. If you can't see the ❄, it's under the **^** arrow in the tray — drag it out onto the taskbar and it stays there.
 
 Whatever you pick there is remembered for next time. Tick **Start with Windows** in the same menu and it comes back on its own after a restart (`WinterIsComing.exe --autostart on` does the same from a script, `off` undoes it). Only the pause isn't remembered — coming back to a dead desktop looks like something is broken. You'll need the [.NET 8 SDK](https://dotnet.microsoft.com/download) (`winget install Microsoft.DotNet.SDK.8`).
 

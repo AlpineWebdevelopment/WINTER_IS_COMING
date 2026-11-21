@@ -1212,6 +1212,47 @@ sealed class SnowWorld
     }
 }
 
+// MARK: - The panel
+//
+// Left-clicking the tray icon opens this rather than switching the snow off on the spot. It is an
+// ordinary opaque window — no layering, so GDI can draw the text — painted with the same software
+// renderer as the snow, then blitted in one go.
+
+static class Ui
+{
+    public const int Width = 364, Height = 584;      // logical px
+
+    public const int None = 0, Snow = 1, Light = 2, Medium = 3, Heavy = 4,
+                     Wind0 = 10,                      // Wind0 .. Wind0 + 4
+                     Balls = 20, Fairy = 21, Plough = 22,
+                     SendPlough = 30, Clear = 31, AutoStart = 32, Quit = 33, Close = 34;
+
+    public struct Zone { public float X0, Y0, X1, Y1; public int Id; }
+
+    public static readonly List<Zone> Zones = new();
+    public static int Hover = None;
+
+    // the live state, copied in before each paint so the drawing code stays dumb
+    public static bool SnowOn, BallsOn, FairyOn, PloughOn, StartOn;
+    public static int Amount;
+    public static float Wind;
+
+    public static void Begin() => Zones.Clear();
+
+    public static void Add(float x0, float y0, float x1, float y1, int id)
+        => Zones.Add(new Zone { X0 = x0, Y0 = y0, X1 = x1, Y1 = y1, Id = id });
+
+    public static int At(float x, float y)
+    {
+        for (int i = Zones.Count - 1; i >= 0; i--)
+        {
+            var z = Zones[i];
+            if (x >= z.X0 && x < z.X1 && y >= z.Y0 && y < z.Y1) return z.Id;
+        }
+        return None;
+    }
+}
+
 // MARK: - Software renderer into a premultiplied BGRA buffer
 
 unsafe static class Render
@@ -1532,7 +1573,7 @@ unsafe static class Render
     static readonly float[] pvx = new float[6], pvy = new float[6];
 
     /// Rounded box with a vertical gradient, given in screen pixels
-    static void GradBox(uint* buf, int bw, int bh, float xa, float xb, float ya, float yb, float round,
+    public static void GradBox(uint* buf, int bw, int bh, float xa, float xb, float ya, float yb, float round,
                         float r0, float g0, float b0, float r1, float g1, float b1, float alpha)
     {
         float lo = MathF.Min(xa, xb), hi = MathF.Max(xa, xb);
@@ -2352,6 +2393,7 @@ static unsafe class Program
 
         uint dpi = GetDpiForWindow(overlay);
         scale = dpi > 0 ? dpi / 96f : 1;
+        CreatePanel(inst);
         screenDC = GetDC(IntPtr.Zero);
         CreateSurface();
         world = new SnowWorld(bw / scale, bh / scale);
@@ -2367,6 +2409,268 @@ static unsafe class Program
             TranslateMessage(ref msg);
             DispatchMessageW(ref msg);
         }
+    }
+
+    // MARK: The panel window
+
+    static IntPtr panel, panelDC, panelDib, panelBits, fontTitle, fontLabel, fontSmall;
+    static int panelW, panelH;
+    static bool panelOpen;
+
+    [DllImport("user32.dll")] static extern IntPtr BeginPaint(IntPtr h, out PAINTSTRUCT ps);
+    [DllImport("user32.dll")] static extern bool EndPaint(IntPtr h, ref PAINTSTRUCT ps);
+    [DllImport("user32.dll")] static extern bool InvalidateRect(IntPtr h, IntPtr r, bool erase);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int DrawTextW(IntPtr dc, string text, int len, ref RECT r, uint fmt);
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFontW(int h, int w, int esc, int orient, int weight, uint italic, uint underline,
+                                     uint strike, uint charset, uint outPrec, uint clipPrec, uint quality,
+                                     uint pitch, string face);
+    [DllImport("gdi32.dll")] static extern uint SetTextColor(IntPtr dc, uint colour);
+    [DllImport("gdi32.dll")] static extern int SetBkMode(IntPtr dc, int mode);
+    [DllImport("gdi32.dll")] static extern bool GdiFlush();
+    [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int value, int size);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct PAINTSTRUCT { public IntPtr hdc; public int fErase; public RECT rc; public int restore, update; public long reserved1, reserved2, reserved3, reserved4; }
+
+    const uint DT_LEFT = 0, DT_CENTER = 1, DT_RIGHT = 2, DT_VCENTER = 4, DT_SINGLELINE = 0x20, DT_WORDBREAK = 0x10;
+    const uint WM_PAINT = 0xF, WM_MOUSELEAVE = 0x2A3, WM_ACTIVATE = 6, WM_KEYDOWN = 0x100;
+
+    static void CreatePanel(IntPtr inst)
+    {
+        panel = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, "WinterIsComingWnd", "Let it snow",
+                                WS_POPUP, 0, 0, 10, 10, IntPtr.Zero, IntPtr.Zero, inst, IntPtr.Zero);
+        int round = 2;                                   // DWMWCP_ROUND
+        DwmSetWindowAttribute(panel, 33, ref round, 4);
+        panelDC = CreateCompatibleDC(IntPtr.Zero);
+        MakePanelSurface();
+    }
+
+    static void MakePanelSurface()
+    {
+        panelW = (int)MathF.Round(Ui.Width * scale);
+        panelH = (int)MathF.Round(Ui.Height * scale);
+        if (panelDib != IntPtr.Zero) DeleteObject(panelDib);
+        var bmi = new BITMAPINFO
+        {
+            bmiHeader = new BITMAPINFOHEADER
+            {
+                biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
+                biWidth = panelW, biHeight = -panelH, biPlanes = 1, biBitCount = 32, biCompression = 0,
+            }
+        };
+        panelDib = CreateDIBSection(panelDC, ref bmi, 0, out panelBits, IntPtr.Zero, 0);
+        SelectObject(panelDC, panelDib);
+
+        if (fontTitle != IntPtr.Zero) { DeleteObject(fontTitle); DeleteObject(fontLabel); DeleteObject(fontSmall); }
+        fontTitle = MakeFont(19, 700);
+        fontLabel = MakeFont(14, 400);
+        fontSmall = MakeFont(12, 400);
+    }
+
+    static IntPtr MakeFont(float size, int weight)
+        => CreateFontW(-(int)MathF.Round(size * scale), 0, 0, 0, weight, 0, 0, 0, 1, 0, 0, 5, 0, "Segoe UI");
+
+    static void TogglePanel()
+    {
+        if (panelOpen) { ShowWindow(panel, SW_HIDE); panelOpen = false; return; }
+        if (panelW != (int)MathF.Round(Ui.Width * scale)) MakePanelSurface();
+
+        // bottom right, clear of the taskbar
+        float? tb = ReadTaskbarTop();
+        int bottom = (int)((tb ?? bh / scale) * scale) - (int)(12 * scale);
+        int x = bw - panelW - (int)(12 * scale), y = bottom - panelH;
+        if (y < 0) y = 0;
+        SetWindowPos(panel, HWND_TOPMOST, x, y, panelW, panelH, 0);
+        ShowWindow(panel, SW_SHOWNOACTIVATE);
+        SetForegroundWindow(panel);
+        panelOpen = true;
+        Ui.Hover = Ui.None;
+        InvalidateRect(panel, IntPtr.Zero, false);
+    }
+
+    static void ClosePanel()
+    {
+        if (!panelOpen) return;
+        ShowWindow(panel, SW_HIDE);
+        panelOpen = false;
+    }
+
+    static void PanelClick(int id)
+    {
+        switch (id)
+        {
+            case Ui.Snow: TogglePause(); break;
+            case Ui.Light: Cfg.TargetFlakes = 120; break;
+            case Ui.Medium: Cfg.TargetFlakes = 260; break;
+            case Ui.Heavy: Cfg.TargetFlakes = 500; break;
+            case Ui.Balls:
+                Cfg.Snowballs = !Cfg.Snowballs;
+                if (!Cfg.Snowballs) SetClickThrough(true);
+                break;
+            case Ui.Fairy: Cfg.Lights = !Cfg.Lights; break;
+            case Ui.Plough: world.AutoPlow = !world.AutoPlow; break;
+            case Ui.SendPlough: world.SendPlow(); break;
+            case Ui.Clear: world.ClearAll(); break;
+            case Ui.AutoStart: SetAutoStart(!AutoStartOn()); break;
+            case Ui.Close: ClosePanel(); return;
+            case Ui.Quit: ClosePanel(); Quit(); return;
+            default:
+                if (id >= Ui.Wind0 && id < Ui.Wind0 + WindSteps.Length) Cfg.Wind = WindSteps[id - Ui.Wind0].V;
+                else return;
+                break;
+        }
+        SaveSettings();
+        InvalidateRect(panel, IntPtr.Zero, false);
+    }
+
+    // MARK: Painting the panel
+
+    static unsafe void PaintPanel()
+    {
+        uint* buf = (uint*)panelBits;
+        float s = scale;
+        Ui.Begin();
+        Ui.SnowOn = !paused;
+        Ui.BallsOn = Cfg.Snowballs;
+        Ui.FairyOn = Cfg.Lights;
+        Ui.PloughOn = world != null && world.AutoPlow;
+        Ui.StartOn = AutoStartOn();
+        Ui.Amount = Cfg.TargetFlakes;
+        Ui.Wind = Cfg.Wind;
+
+        for (int i = 0; i < panelW * panelH; i++) buf[i] = 0xFF161A24;
+
+        float y = 14;
+        Render.GradBox(buf, panelW, panelH, 0, panelW, 0, 2 * s, 0, 0.30f, 0.36f, 0.50f, 0.30f, 0.36f, 0.50f, 1);
+
+        // title, and the × in the corner
+        Label("Let it snow", 18, y, Ui.Width - 60, 26, fontTitle, 0xF2F5FF, DT_LEFT);
+        Pill(Ui.Width - 42, y + 1, Ui.Width - 18, y + 25, Ui.Close, 0.22f, 0.24f, 0.31f);
+        Label("×", Ui.Width - 42, y + 1, 24, 24, fontLabel, 0xC8CEDC, DT_CENTER);
+        y += 32;
+        Label("Everything the ❄ in the tray can do.", 18, y, Ui.Width - 36, 20, fontSmall, 0x8F97AA, DT_LEFT);
+        y += 30;
+
+        // the switch
+        Card(14, y, Ui.Width - 14, y + 52);
+        Label(Ui.SnowOn ? "Snow is falling" : "Snow is off", 28, y + 15, 200, 22, fontLabel, 0xF2F5FF, DT_LEFT);
+        Switch(Ui.Width - 28 - 46, y + 14, Ui.SnowOn, Ui.Snow);
+        y += 64;
+
+        Heading("Snow amount", ref y);
+        Segment(new[] { "Light", "Medium", "Heavy" },
+                Ui.Amount == 120 ? 0 : Ui.Amount == 500 ? 2 : 1, Ui.Light, ref y);
+
+        Heading("Wind", ref y);
+        int wsel = 2;
+        for (int i = 0; i < WindSteps.Length; i++) if (MathF.Abs(Ui.Wind - WindSteps[i].V) < 0.01f) wsel = i;
+        Segment(new[] { "≪", "‹", "Calm", "›", "≫" }, wsel, Ui.Wind0, ref y);
+
+        y += 6;
+        ToggleRow("Snowballs and snowmen", Ui.BallsOn, Ui.Balls, ref y);
+        ToggleRow("Fairy lights", Ui.FairyOn, Ui.Fairy, ref y);
+        ToggleRow("Snowplough comes by itself", Ui.PloughOn, Ui.Plough, ref y);
+        ToggleRow("Start with Windows", Ui.StartOn, Ui.AutoStart, ref y);
+
+        y += 8;
+        Button("Send the snowplough", 14, y, Ui.Width / 2f - 4, y + 34, Ui.SendPlough);
+        Button("Clear the snow", Ui.Width / 2f + 4, y, Ui.Width - 14, y + 34, Ui.Clear);
+        y += 44;
+        Button("Quit", Ui.Width - 94, y, Ui.Width - 14, y + 30, Ui.Quit);
+
+        GdiFlush();
+    }
+
+    static unsafe void Card(float x0, float y0, float x1, float y1)
+        => Render.GradBox((uint*)panelBits, panelW, panelH, x0 * scale, x1 * scale, y0 * scale, y1 * scale,
+                          10 * scale, 0.14f, 0.16f, 0.22f, 0.12f, 0.14f, 0.19f, 1);
+
+    static unsafe void Pill(float x0, float y0, float x1, float y1, int id, float r, float g, float b)
+    {
+        bool hot = Ui.Hover == id;
+        Render.GradBox((uint*)panelBits, panelW, panelH, x0 * scale, x1 * scale, y0 * scale, y1 * scale,
+                       (y1 - y0) * 0.5f * scale, r + (hot ? 0.08f : 0), g + (hot ? 0.08f : 0), b + (hot ? 0.08f : 0),
+                       r, g, b, 1);
+        Ui.Add(x0, y0, x1, y1, id);
+    }
+
+    static unsafe void Switch(float x, float y, bool on, int id)
+    {
+        bool hot = Ui.Hover == id;
+        float w = 46, h = 26;
+        uint* buf = (uint*)panelBits;
+        if (on)
+            Render.GradBox(buf, panelW, panelH, x * scale, (x + w) * scale, y * scale, (y + h) * scale,
+                           h * 0.5f * scale, 0.29f, 0.70f, 0.42f, 0.22f, 0.60f, 0.35f, 1);
+        else
+            Render.GradBox(buf, panelW, panelH, x * scale, (x + w) * scale, y * scale, (y + h) * scale,
+                           h * 0.5f * scale, 0.26f, 0.28f, 0.35f, 0.21f, 0.23f, 0.29f, 1);
+        float knob = on ? x + w - h * 0.5f : x + h * 0.5f;
+        Render.FillCircle(buf, panelW, panelH, knob * scale, (y + h * 0.5f) * scale, (h * 0.5f - 3) * scale,
+                          1, 1, 1, hot ? 1 : 0.92f);
+        Ui.Add(x, y, x + w, y + h, id);
+    }
+
+    static void Heading(string text, ref float y)
+    {
+        Label(text, 20, y, 200, 18, fontSmall, 0x8F97AA, DT_LEFT);
+        y += 22;
+    }
+
+    static unsafe void Segment(string[] items, int selected, int firstId, ref float y)
+    {
+        float x0 = 14, x1 = Ui.Width - 14, h = 32;
+        Card(x0, y, x1, y + h);
+        float w = (x1 - x0) / items.Length;
+        for (int i = 0; i < items.Length; i++)
+        {
+            float a = x0 + i * w, b = a + w;
+            if (i == selected)
+                Render.GradBox((uint*)panelBits, panelW, panelH, (a + 3) * scale, (b - 3) * scale,
+                               (y + 3) * scale, (y + h - 3) * scale, 8 * scale,
+                               0.27f, 0.42f, 0.72f, 0.22f, 0.35f, 0.62f, 1);
+            else if (Ui.Hover == firstId + i)
+                Render.GradBox((uint*)panelBits, panelW, panelH, (a + 3) * scale, (b - 3) * scale,
+                               (y + 3) * scale, (y + h - 3) * scale, 8 * scale,
+                               0.20f, 0.22f, 0.29f, 0.20f, 0.22f, 0.29f, 1);
+            Label(items[i], a, y, w, h, fontLabel, i == selected ? 0xFFFFFFu : 0xC2C8D6u, DT_CENTER);
+            Ui.Add(a, y, b, y + h, firstId + i);
+        }
+        y += h + 12;
+    }
+
+    static void ToggleRow(string text, bool on, int id, ref float y)
+    {
+        Card(14, y, Ui.Width - 14, y + 42);
+        Label(text, 28, y + 10, Ui.Width - 110, 22, fontLabel, 0xE4E8F2, DT_LEFT);
+        Switch(Ui.Width - 28 - 46, y + 8, on, id);
+        Ui.Add(14, y, Ui.Width - 14, y + 42, id);
+        y += 50;
+    }
+
+    static unsafe void Button(string text, float x0, float y0, float x1, float y1, int id)
+    {
+        bool hot = Ui.Hover == id;
+        Render.GradBox((uint*)panelBits, panelW, panelH, x0 * scale, x1 * scale, y0 * scale, y1 * scale,
+                       9 * scale, hot ? 0.26f : 0.21f, hot ? 0.29f : 0.23f, hot ? 0.37f : 0.30f,
+                       0.17f, 0.19f, 0.25f, 1);
+        Label(text, x0, y0, x1 - x0, y1 - y0, fontLabel, 0xDCE2EE, DT_CENTER);
+        Ui.Add(x0, y0, x1, y1, id);
+    }
+
+    static void Label(string text, float x, float y, float w, float h, IntPtr font, uint rgb, uint align)
+    {
+        SelectObject(panelDC, font);
+        SetBkMode(panelDC, 1);                                   // TRANSPARENT
+        SetTextColor(panelDC, ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF));
+        var r = new RECT
+        {
+            Left = (int)MathF.Round(x * scale), Top = (int)MathF.Round(y * scale),
+            Right = (int)MathF.Round((x + w) * scale), Bottom = (int)MathF.Round((y + h) * scale),
+        };
+        DrawTextW(panelDC, text, -1, ref r, align | DT_VCENTER | DT_SINGLELINE);
     }
 
     // MARK: Reading the background behind the snow
@@ -2469,13 +2773,43 @@ static unsafe class Program
                 // Left click is the switch, right click opens the menu — the Windows convention,
                 // and it means the snow can be stopped without going hunting through a menu.
                 uint ev = (uint)(lParam.ToInt64() & 0xFFFF);
-                if (ev == WM_LBUTTONUP) TogglePause();
+                if (ev == WM_LBUTTONUP) TogglePanel();
                 else if (ev == WM_RBUTTONUP) ShowMenu();
                 return IntPtr.Zero;
             case WM_HOTKEY:
                 if (wParam.ToInt32() == HOTKEY_ID) TogglePause();
                 return IntPtr.Zero;
+            case WM_MOUSEMOVE when hWnd == panel:
+            {
+                short hx = (short)(lParam.ToInt64() & 0xFFFF), hy = (short)((lParam.ToInt64() >> 16) & 0xFFFF);
+                int was = Ui.Hover;
+                Ui.Hover = Ui.At(hx / scale, hy / scale);
+                if (was != Ui.Hover) InvalidateRect(panel, IntPtr.Zero, false);
+                return IntPtr.Zero;
+            }
+            case WM_PAINT:
+                if (hWnd == panel)
+                {
+                    PaintPanel();
+                    IntPtr pdc = BeginPaint(hWnd, out PAINTSTRUCT ps);
+                    BitBlt(pdc, 0, 0, panelW, panelH, panelDC, 0, 0, SRCCOPY);
+                    EndPaint(hWnd, ref ps);
+                    return IntPtr.Zero;
+                }
+                break;
+            case WM_ACTIVATE:
+                if (hWnd == panel && (wParam.ToInt64() & 0xFFFF) == 0) ClosePanel();
+                return IntPtr.Zero;
+            case WM_KEYDOWN:
+                if (hWnd == panel && wParam.ToInt32() == 0x1B) ClosePanel();
+                return IntPtr.Zero;
             case WM_LBUTTONDOWN:
+                if (hWnd == panel)
+                {
+                    short cx = (short)(lParam.ToInt64() & 0xFFFF), cy = (short)((lParam.ToInt64() >> 16) & 0xFFFF);
+                    PanelClick(Ui.At(cx / scale, cy / scale));
+                    return IntPtr.Zero;
+                }
                 // Only reaches us while the cursor is over a snowball (see SetClickThrough)
                 if (hWnd == overlay && !paused)
                 {
