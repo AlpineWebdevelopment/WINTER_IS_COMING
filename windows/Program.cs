@@ -186,9 +186,11 @@ sealed class Snowplow
     public float Heap;          // how much snow is piled up in front of the blade
     public float Wheel;         // wheel rotation
 
-    public const float Speed = 165;       // logical px per second
-    public const float Length = 42;       // body length behind the blade
+    public const float Speed = 150;       // logical px per second
+    public const float Scale = 1.5f;      // how big the truck is drawn
+    public const float Length = 40 * Scale;   // body length behind the blade
     public const float HeapMax = 420;
+    public static int Runs;               // how many times a plough has been sent (diagnostics)
 }
 
 record struct Win(long Id, float L, float T, float R, float B)
@@ -222,9 +224,9 @@ sealed class SnowWorld
 
     // Snowplough
     public Snowplow Plow;
-    public bool AutoPlow;
-    public float AutoPlowEvery = 150;     // seconds between automatic runs
-    float plowAcc;
+    public bool AutoPlow = true;          // you asked for one that comes by itself, so it does
+    public float AutoPlowEvery = 180;     // seconds between automatic runs
+    float plowAcc = 135;                  // but the first turns up sooner, so you get to see one
 
     // Snowballs
     public readonly List<Snowball> Balls = new();
@@ -386,6 +388,7 @@ sealed class SnowWorld
         if (Plow != null) return;
         int dir = Rnd.F(0, 1) < 0.5f ? 1 : -1;
         Plow = new Snowplow { Dir = dir, X = dir > 0 ? -Snowplow.Length - 10 : W + Snowplow.Length + 10 };
+        Snowplow.Runs++;
         plowAcc = 0;
     }
 
@@ -1281,9 +1284,9 @@ unsafe static class Render
 
     public static void PlowTruck(uint* buf, int bw, int bh, Snowplow p, float groundTop, float s)
     {
-        float d = p.Dir, gy = groundTop * s;
-        float SX(float lx) => (p.X + d * lx) * s;     // local x: 0 is the blade tip, negative is behind
-        float SY(float ly) => gy + ly * s;            // local y: 0 is the ground, negative is up
+        float d = p.Dir, gy = groundTop * s, k = Snowplow.Scale * s;
+        float SX(float lx) => p.X * s + d * lx * k;   // local x: 0 is the blade tip, negative is behind
+        float SY(float ly) => gy + ly * k;            // local y: 0 is the ground, negative is up
 
         // the heap of snow being shoved along in front of the blade
         if (p.Heap > 1)
@@ -1294,38 +1297,38 @@ unsafe static class Render
             pvx[1] = SX(hw); pvy[1] = SY(-1.5f);
             pvx[2] = SX(hw); pvy[2] = SY(0);
             pvx[3] = SX(-1); pvy[3] = SY(0);
-            FillPoly(buf, bw, bh, pvx, pvy, 4, 2.2f * s, 0.98f, 0.99f, 1f, 0.97f);
+            FillPoly(buf, bw, bh, pvx, pvy, 4, 2.2f * k, 0.98f, 0.99f, 1f, 0.97f);
         }
 
         // wheels
-        for (int k = 0; k < 2; k++)
+        for (int i = 0; i < 2; i++)
         {
-            float wx = SX(k == 0 ? -32 : -13), wy = SY(-6), wr = 5.6f * s;
+            float wx = SX(i == 0 ? -32 : -13), wy = SY(-6), wr = 5.6f * k;
             FillCircle(buf, bw, bh, wx, wy, wr, 0.13f, 0.14f, 0.16f, 1);
             FillCircle(buf, bw, bh, wx, wy, wr * 0.45f, 0.55f, 0.57f, 0.62f, 1);
             for (int t = 0; t < 3; t++)   // spokes, so you can see it roll
             {
                 float a = p.Wheel + t * 2.0944f;
                 FillSegment(buf, bw, bh, wx, wy, wx + MathF.Cos(a) * wr * 0.8f, wy + MathF.Sin(a) * wr * 0.8f,
-                            MathF.Max(0.6f, 0.9f * s), 0.42f, 0.44f, 0.48f, 1);
+                            MathF.Max(0.6f, 0.9f * k), 0.42f, 0.44f, 0.48f, 1);
             }
         }
 
         // body, cab and window
-        Box(buf, bw, bh, SX(-41), SX(-7), SY(-20), SY(-6), 2.5f * s, 0.95f, 0.55f, 0.10f);
-        Box(buf, bw, bh, SX(-31), SX(-15), SY(-31), SY(-19), 2.5f * s, 0.93f, 0.50f, 0.09f);
-        Box(buf, bw, bh, SX(-29), SX(-17), SY(-29), SY(-23), 1.4f * s, 0.35f, 0.47f, 0.58f);
+        Box(buf, bw, bh, SX(-41), SX(-7), SY(-20), SY(-6), 2.5f * k, 0.95f, 0.55f, 0.10f);
+        Box(buf, bw, bh, SX(-31), SX(-15), SY(-31), SY(-19), 2.5f * k, 0.93f, 0.50f, 0.09f);
+        Box(buf, bw, bh, SX(-29), SX(-17), SY(-29), SY(-23), 1.4f * k, 0.35f, 0.47f, 0.58f);
 
         // amber beacon on the roof
-        FillCircle(buf, bw, bh, SX(-23), SY(-33), 2.6f * s, 1f, 0.72f, 0.15f, 1);
-        FillCircle(buf, bw, bh, SX(-23), SY(-33), 5.5f * s, 1f, 0.72f, 0.15f, 0.22f);
+        FillCircle(buf, bw, bh, SX(-23), SY(-33), 2.6f * k, 1f, 0.72f, 0.15f, 1);
+        FillCircle(buf, bw, bh, SX(-23), SY(-33), 5.5f * k, 1f, 0.72f, 0.15f, 0.22f);
 
         // the blade: a steel plate raked forward
         pvx[0] = SX(-7); pvy[0] = SY(-3);
         pvx[1] = SX(-2); pvy[1] = SY(-23);
         pvx[2] = SX(3); pvy[2] = SY(-21.5f);
         pvx[3] = SX(-1.5f); pvy[3] = SY(0);
-        FillPoly(buf, bw, bh, pvx, pvy, 4, 1.2f * s, 0.74f, 0.78f, 0.84f, 1);
+        FillPoly(buf, bw, bh, pvx, pvy, 4, 1.2f * k, 0.74f, 0.78f, 0.84f, 1);
     }
 
     static readonly List<Snowball> drawList = new();
@@ -1504,13 +1507,20 @@ static unsafe class Program
     static double lastT;
     static bool paused;
     static bool clickThrough = true;          // WS_EX_TRANSPARENT currently set?
+    static string diagPath;
+    static double lastDiag;
     static readonly List<Win> found = new();
     static int taskbarZ;                      // how many accepted windows are drawn in front of the taskbar
     static readonly StringBuilder clsName = new(64);
 
     [STAThread]
-    static void Main()
+    static void Main(string[] args)
     {
+        // --diag <file>: dump what the app thinks the desktop looks like, every couple of seconds.
+        // Only for working out why the snow is landing somewhere odd; off unless asked for.
+        for (int i = 0; i < args.Length - 1; i++)
+            if (args[i] == "--diag") diagPath = args[i + 1];
+
         SetProcessDpiAwarenessContext((IntPtr)(-4));   // per-monitor DPI aware v2: real pixel coordinates
         IntPtr inst = GetModuleHandleW(null);
 
@@ -1643,6 +1653,48 @@ static unsafe class Program
         var size = new SIZE { cx = bw, cy = bh };
         var blend = new BLENDFUNCTION { BlendOp = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };   // AC_SRC_ALPHA
         UpdateLayeredWindow(overlay, screenDC, ref dst, ref size, memDC, ref src, 0, ref blend, ULW_ALPHA);
+
+        if (diagPath != null && now - lastDiag > 2) { lastDiag = now; WriteDiag(); }
+    }
+
+    static void WriteDiag()
+    {
+        try
+        {
+            var sb = new StringBuilder();
+            sb.Append("WinterIsComing state at ").Append(DateTime.Now.ToString("HH:mm:ss")).Append('\n');
+            sb.Append($"screen {bw}x{bh} physical, dpi scale {scale:0.00}, world {world.W:0}x{world.H:0} logical\n");
+            sb.Append($"ground: topY {world.Ground.TopY:0}  onTaskbar {world.GroundIsTaskbar}  taskbarZ {world.TaskbarZ}  ");
+            int occ = 0, cols = world.Ground.Count;
+            float deepest = 0;
+            for (int c = 0; c < cols; c++) { if (world.Ground.Occ[c]) occ++; deepest = MathF.Max(deepest, world.Ground.H[c]); }
+            sb.Append($"hidden {occ}/{cols} columns  deepest {deepest:0.0}\n");
+            sb.Append($"windows front-to-back ({world.Order.Count}):\n");
+            for (int i = 0; i < world.Order.Count; i++)
+            {
+                var w = world.Order[i];
+                bool overTaskbar = world.GroundIsTaskbar && w.B > world.Ground.TopY + 1;
+                string pile = world.Piles.TryGetValue(w.Id, out var p)
+                    ? $"snow line y={p.TopY:0} cap {p.MaxH:0} deepest {Deepest(p):0.0}"
+                    : "no snow line (no room above its top edge)";
+                sb.Append($"  [{i}] x {w.L:0}..{w.R:0}  y {w.T:0}..{w.B:0}  ")
+                  .Append(i < world.TaskbarZ ? "in front of taskbar" : "behind taskbar")
+                  .Append(overTaskbar ? ", hangs over it -> hides its snow" : ", does not hang over it")
+                  .Append("  ").Append(pile).Append('\n');
+            }
+            sb.Append($"snowballs {world.Balls.Count}, plough ")
+              .Append(world.Plow == null ? "not on screen" : $"at x={world.Plow.X:0} dir {world.Plow.Dir} heap {world.Plow.Heap:0}")
+              .Append($", runs so far {Snowplow.Runs}, auto {world.AutoPlow}\n");
+            System.IO.File.WriteAllText(diagPath, sb.ToString());
+        }
+        catch { /* diagnostics must never take the app down */ }
+    }
+
+    static float Deepest(Pile p)
+    {
+        float m = 0;
+        foreach (var h in p.H) m = MathF.Max(m, h);
+        return m;
     }
 
     // MARK: Windows on screen
@@ -1661,21 +1713,25 @@ static unsafe class Program
     {
         if (h == overlay || h == tray) return true;
         if (!IsWindowVisible(h) || IsIconic(h)) return true;
-        long ex = GetWindowLongPtrW(h, GWL_EXSTYLE).ToInt64();
-        if ((ex & WS_EX_TOOLWINDOW) != 0) return true;                       // tool windows, popups
-        if ((ex & WS_EX_TRANSPARENT) != 0 && (ex & WS_EX_LAYERED) != 0) return true;  // other overlays
-        if (DwmGetWindowAttribute(h, DWMWA_CLOAKED, out int cloaked, 4) == 0 && cloaked != 0) return true; // other desktops, hidden UWP
-        if (GetWindowTextLengthW(h) == 0) return true;
+
         clsName.Clear();
         GetClassNameW(h, clsName, clsName.Capacity);
         string cls = clsName.ToString();
         if (cls == "Shell_TrayWnd")
         {
-            // Remember where the taskbar sits in the z-order: everything found before it is drawn
-            // in front of it, and only those windows can hide the snow lying on it.
+            // Remember where the taskbar sits in the z-order: everything found before it is drawn in
+            // front of it, and only those windows can hide the snow lying on it. This has to come
+            // before the style checks below — the taskbar is itself a WS_EX_TOOLWINDOW, so testing
+            // that first threw it away before we ever looked at the class name.
             taskbarZ = found.Count;
             return true;
         }
+
+        long ex = GetWindowLongPtrW(h, GWL_EXSTYLE).ToInt64();
+        if ((ex & WS_EX_TOOLWINDOW) != 0) return true;                       // tool windows, popups
+        if ((ex & WS_EX_TRANSPARENT) != 0 && (ex & WS_EX_LAYERED) != 0) return true;  // other overlays
+        if (DwmGetWindowAttribute(h, DWMWA_CLOAKED, out int cloaked, 4) == 0 && cloaked != 0) return true; // other desktops, hidden UWP
+        if (GetWindowTextLengthW(h) == 0) return true;
         if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_SecondaryTrayWnd") return true;
 
         // The visible frame (GetWindowRect includes invisible resize borders on Windows 10/11)
