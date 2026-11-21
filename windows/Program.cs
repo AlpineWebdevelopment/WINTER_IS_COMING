@@ -53,6 +53,11 @@ static class Cfg
     public static float Wind = 0;
     public const float WindMax = 160;              // logical px per second at full strength
 
+    // A Christmas tree standing in the snow, wherever you drag it
+    public static bool Tree = false;
+    public static float TreeX = 0.12f;             // across the screen, 0..1
+    public const float TreeH = 134, TreeW = 80;    // what it takes up, for grabbing hold of it
+
     // Keep the snow out of screenshots and screen recordings while leaving it on the screen
     public static bool HideFromCapture = true;
 
@@ -548,6 +553,7 @@ sealed class SnowWorld
             dragBall = null;
         }
 
+        if (treeDrag) Cfg.TreeX = Math.Clamp((mx + treeOffX) / W, 0.04f, 0.96f);
         StepPlow(dt);
         StepSanta(dt);
     }
@@ -1117,7 +1123,20 @@ sealed class SnowWorld
 
     /// The overlay normally lets every click through. Only while the mouse is over a snowball (or dragging one)
     /// does it catch clicks, so you can grab the ball without clicking the window underneath.
-    public bool WantsMouse(float mx, float my) => Cfg.Snowballs && (dragBall != null || BallAt(mx, my) != null);
+    public bool WantsMouse(float mx, float my)
+        => treeDrag || OnTree(mx, my) || (Cfg.Snowballs && (dragBall != null || BallAt(mx, my) != null));
+
+    bool treeDrag;
+    float treeOffX;
+
+    /// The tree's body, but not the last few pixels down on the taskbar — grabbing those would
+    /// swallow clicks meant for the taskbar buttons underneath.
+    public bool OnTree(float mx, float my)
+    {
+        if (!Cfg.Tree) return false;
+        float bx = Cfg.TreeX * W, by = Ground.TopY;
+        return my > by - Cfg.TreeH && my < by - 6 && MathF.Abs(mx - bx) < Cfg.TreeW * 0.5f;
+    }
 
     Snowball Above(Snowball b)
     {
@@ -1143,6 +1162,7 @@ sealed class SnowWorld
 
     public void MouseDown(float mx, float my)
     {
+        if (OnTree(mx, my)) { treeDrag = true; treeOffX = Cfg.TreeX * W - mx; return; }
         if (!Cfg.Snowballs) return;
         var b = BallAt(mx, my);
         if (b == null) return;
@@ -1164,6 +1184,7 @@ sealed class SnowWorld
 
     public void MouseUp()
     {
+        treeDrag = false;
         var b = dragBall;
         if (b == null) return;
         dragBall = null;
@@ -1324,11 +1345,11 @@ sealed class SnowWorld
 
 static class Ui
 {
-    public const int Width = 364, Height = 742;      // logical px
+    public const int Width = 364, Height = 792;      // logical px
 
     public const int None = 0, Snow = 1, Light = 2, Medium = 3, Heavy = 4,
                      Wind0 = 10,                      // Wind0 .. Wind0 + 4
-                     Balls = 20, Fairy = 21, Plough = 22, Stars = 23, SantaBy = 24, NoCapture = 25,
+                     Balls = 20, Fairy = 21, Plough = 22, Stars = 23, SantaBy = 24, NoCapture = 25, TreeUp = 26,
                      SendPlough = 30, Clear = 31, AutoStart = 32, Quit = 33, Close = 34, SendSanta = 35;
 
     public struct Zone { public float X0, Y0, X1, Y1; public int Id; }
@@ -1337,7 +1358,7 @@ static class Ui
     public static int Hover = None;
 
     // the live state, copied in before each paint so the drawing code stays dumb
-    public static bool SnowOn, BallsOn, FairyOn, PloughOn, StartOn, StarsOn, SantaOn, NoCaptureOn;
+    public static bool SnowOn, BallsOn, FairyOn, PloughOn, StartOn, StarsOn, SantaOn, NoCaptureOn, TreeOn;
     public static int Amount;
     public static float Wind;
 
@@ -2119,17 +2140,27 @@ unsafe static class Render
     /// it drives behind that window the way the piles and the snowballs already do. Masking every
     /// drawing primitive would mean threading the mask through all of them; saving and restoring a
     /// few columns around the truck costs one small buffer and keeps the drawing code plain.
-    static void Plough(uint* buf, int bw, int bh, SnowWorld w, float s)
+    /// Draw something standing on the ground so that a window hanging over the taskbar hides it,
+    /// the way the piles and the snowballs are hidden: save the covered columns, draw, put them
+    /// back. `tree` picks which of the two things to draw — the only two that stand down there.
+    static void BehindOverhang(uint* buf, int bw, int bh, SnowWorld w, float s,
+                               float lx, float ly, float lw, float lh, bool tree)
     {
-        var p = w.Plow;
-        int x0 = Math.Max(0, (int)MathF.Floor((p.X - 300) * s));
-        int x1 = Math.Min(bw - 1, (int)MathF.Ceiling((p.X + 300) * s));
-        int y0 = Math.Max(0, (int)MathF.Floor((w.Ground.TopY - 95) * s));
-        int y1 = Math.Min(bh - 1, (int)MathF.Ceiling((w.Ground.TopY + 8) * s));
-        if (x1 < x0 || y1 < y0) { PlowTruck(buf, bw, bh, p, w.Ground.TopY, s, w.Ground.BgLight); return; }
+        int x0 = Math.Max(0, (int)MathF.Floor(lx * s));
+        int x1 = Math.Min(bw - 1, (int)MathF.Ceiling((lx + lw) * s));
+        int y0 = Math.Max(0, (int)MathF.Floor(ly * s));
+        int y1 = Math.Min(bh - 1, (int)MathF.Ceiling((ly + lh) * s));
 
-        int cols = x1 - x0 + 1, rows = y1 - y0 + 1;
-        if (plowSave.Length < cols * rows) plowSave = new uint[cols * rows];
+        void Paint()
+        {
+            if (tree) Tree(buf, bw, bh, w, s);
+            else PlowTruck(buf, bw, bh, w.Plow, w.Ground.TopY, s, w.Ground.BgLight);
+        }
+
+        if (x1 < x0 || y1 < y0) { Paint(); return; }
+
+        int rows = y1 - y0 + 1;
+        if (plowSave.Length < (x1 - x0 + 1) * rows) plowSave = new uint[(x1 - x0 + 1) * rows];
 
         bool any = false;
         for (int x = x0; x <= x1; x++)
@@ -2140,7 +2171,7 @@ unsafe static class Render
             for (int y = y0; y <= y1; y++) plowSave[(x - x0) * rows + (y - y0)] = buf[(long)y * bw + x];
         }
 
-        PlowTruck(buf, bw, bh, p, w.Ground.TopY, s, w.Ground.BgLight);
+        Paint();
         if (!any) return;
 
         for (int x = x0; x <= x1; x++)
@@ -2150,6 +2181,9 @@ unsafe static class Render
             for (int y = y0; y <= y1; y++) buf[(long)y * bw + x] = plowSave[(x - x0) * rows + (y - y0)];
         }
     }
+
+    static void Plough(uint* buf, int bw, int bh, SnowWorld w, float s)
+        => BehindOverhang(buf, bw, bh, w, s, w.Plow.X - 300, w.Ground.TopY - 95, 600, 103, false);
 
     // MARK: The sky: stars, and Santa going over
 
@@ -2327,6 +2361,73 @@ unsafe static class Render
         }
     }
 
+    // MARK: The Christmas tree
+
+    static readonly float[] treeTiers = { 14, 38, 56,  44, 31, 82,  70, 23, 104,  93, 14, 122 };
+    static readonly float[] baubleAt = { -22, 30, 0,  20, 36, 1,  -14, 60, 2,  16, 66, 0,  -9, 88, 1,  10, 92, 2 };
+    static readonly float[] baubleColour = { 0.88f, 0.16f, 0.18f,  0.95f, 0.76f, 0.22f,  0.30f, 0.55f, 0.92f };
+
+    /// A tree standing in the snow wherever you put it. Drawn like the snowman — in front, hidden
+    /// only where a window hangs over the taskbar — so it is there whenever the snow is.
+    public static void Tree(uint* buf, int bw, int bh, SnowWorld w, float s)
+    {
+        float bx = Cfg.TreeX * w.W, by = w.Ground.TopY + 3;
+        float light = w.Ground.BgLight;
+        float o = MathF.Max(0.7f, 0.5f * s);
+
+        // trunk
+        GradBox(buf, bw, bh, (bx - 6) * s, (bx + 6) * s, (by - 18) * s, by * s, 2f * s,
+                0.42f, 0.28f, 0.16f, 0.28f, 0.18f, 0.10f, 1);
+
+        // tiers, bottom first so each one overlaps the one below
+        for (int i = 0; i < 4; i++)
+        {
+            float yb = by - treeTiers[i * 3], hw = treeTiers[i * 3 + 1], yt = by - treeTiers[i * 3 + 2];
+            pvx[0] = (bx - hw) * s; pvy[0] = yb * s;
+            pvx[1] = bx * s; pvy[1] = yt * s;
+            pvx[2] = (bx + hw) * s; pvy[2] = yb * s;
+            GradPoly(buf, bw, bh, pvx, pvy, 3, 1.6f * s + o, 0.03f, 0.14f, 0.07f, 0.03f, 0.14f, 0.07f, 0.85f);
+            GradPoly(buf, bw, bh, pvx, pvy, 3, 1.6f * s,
+                     0.16f, 0.52f, 0.26f, 0.07f, 0.31f, 0.15f, 1);
+
+            // snow settled along the branch tips: overlapping blobs, so they run together into a
+            // scalloped band rather than reading as a row of white beads
+            float span = hw * 1.88f;
+            int n = Math.Max(6, (int)(span / 3.2f));
+            for (int j = 0; j <= n; j++)
+            {
+                float t = j / (float)n;
+                float x = bx - span * 0.5f + span * t;
+                float edge = MathF.Abs(t - 0.5f) * 2;
+                float r = 3.3f - edge * 1.4f + MathF.Sin(t * 19f + hw) * 0.35f;
+                FillCircle(buf, bw, bh, x * s, (yb - r * 0.35f) * s, r * s,
+                           1f, 1f - 0.02f * light, 1f - 0.06f * light, 0.96f);
+            }
+        }
+
+        // baubles
+        for (int i = 0; i < baubleAt.Length; i += 3)
+        {
+            int c = (int)baubleAt[i + 2] * 3;
+            float x = bx + baubleAt[i], y = by - baubleAt[i + 1];
+            FillCircle(buf, bw, bh, x * s, y * s, 3.4f * s,
+                       baubleColour[c], baubleColour[c + 1], baubleColour[c + 2], 1);
+            FillCircle(buf, bw, bh, (x - 1) * s, (y - 1.1f) * s, 1.1f * s, 1f, 1f, 1f, 0.55f);
+        }
+
+        // the star on top
+        float sx = bx, sy = by - 130;
+        Glow(buf, bw, bh, sx * s, sy * s, 16 * s, 1f, 0.88f, 0.42f, 0.42f);
+        for (int i = 0; i < 5; i++)
+        {
+            float a = -MathF.PI / 2 + i * 1.2566f;
+            FillSegment(buf, bw, bh, sx * s, sy * s,
+                        (sx + MathF.Cos(a) * 8.5f) * s, (sy + MathF.Sin(a) * 8.5f) * s,
+                        1.5f * s, 1f, 0.84f, 0.26f, 1);
+        }
+        FillCircle(buf, bw, bh, sx * s, sy * s, 3.4f * s, 1f, 0.93f, 0.60f, 1);
+    }
+
     static readonly List<Snowball> drawList = new();
 
     public static void World(uint* buf, int bw, int bh, SnowWorld w, float s)
@@ -2369,6 +2470,8 @@ unsafe static class Render
                 if (ball.Dragging && !ball.Hidden) Ball(buf, bw, bh, ball, s, w.Ground.BgLight);
         }
 
+        if (Cfg.Tree) BehindOverhang(buf, bw, bh, w, s, Cfg.TreeX * w.W - Cfg.TreeW,
+                                     w.Ground.TopY - Cfg.TreeH - 24, Cfg.TreeW * 2, Cfg.TreeH + 32, true);
         if (w.Plow != null) Plough(buf, bw, bh, w, s);
 
         foreach (var f in w.Flakes) if (f.Clump || f.Layer == 2) Disc(buf, bw, bh, f.X * s, f.Y * s, f.Size * 1.1f * s, f.Alpha);
@@ -2664,6 +2767,8 @@ static unsafe class Program
         SetDword(key, "Stars", Cfg.Stars ? 1 : 0);
         SetDword(key, "Santa", Cfg.Santa ? 1 : 0);
         SetDword(key, "HideFromCapture", Cfg.HideFromCapture ? 1 : 0);
+        SetDword(key, "Tree", Cfg.Tree ? 1 : 0);
+        SetDword(key, "TreeX", (int)MathF.Round(Cfg.TreeX * 1000));
         SetDword(key, "AutoPlough", world != null && world.AutoPlow ? 1 : 0);
         RegCloseKey(key);
     }
@@ -2682,6 +2787,8 @@ static unsafe class Program
         Cfg.Stars = GetDword(key, "Stars", Cfg.Stars ? 1 : 0) != 0;
         Cfg.Santa = GetDword(key, "Santa", Cfg.Santa ? 1 : 0) != 0;
         Cfg.HideFromCapture = GetDword(key, "HideFromCapture", Cfg.HideFromCapture ? 1 : 0) != 0;
+        Cfg.Tree = GetDword(key, "Tree", 0) != 0;
+        Cfg.TreeX = Math.Clamp(GetDword(key, "TreeX", 120) / 1000f, 0.04f, 0.96f);
         loadedAutoPlough = GetDword(key, "AutoPlough", 1) != 0;
         RegCloseKey(key);
     }
@@ -2868,6 +2975,11 @@ static unsafe class Program
             case Ui.Stars: Cfg.Stars = !Cfg.Stars; break;
             case Ui.SantaBy: Cfg.Santa = !Cfg.Santa; break;
             case Ui.NoCapture: Cfg.HideFromCapture = !Cfg.HideFromCapture; ApplyCaptureHiding(); break;
+            case Ui.TreeUp:
+                Cfg.Tree = !Cfg.Tree;
+                // planting one in the snow is no use with the snow switched off
+                if (Cfg.Tree && paused) TogglePause();
+                break;
             case Ui.Clear: world.ClearAll(); break;
             case Ui.AutoStart: SetAutoStart(!AutoStartOn()); break;
             case Ui.Close: ClosePanel(); return;
@@ -2896,6 +3008,7 @@ static unsafe class Program
         Ui.StarsOn = Cfg.Stars;
         Ui.SantaOn = Cfg.Santa;
         Ui.NoCaptureOn = Cfg.HideFromCapture;
+        Ui.TreeOn = Cfg.Tree;
         Ui.Amount = Cfg.TargetFlakes;
         Ui.Wind = Cfg.Wind;
 
@@ -2928,6 +3041,7 @@ static unsafe class Program
         Segment(new[] { "≪", "‹", "Calm", "›", "≫" }, wsel, Ui.Wind0, ref y);
 
         y += 6;
+        ToggleRow("Christmas tree  \u2014  drag it where you like", Ui.TreeOn, Ui.TreeUp, ref y);
         ToggleRow("Snowballs and snowmen", Ui.BallsOn, Ui.Balls, ref y);
         ToggleRow("Fairy lights", Ui.FairyOn, Ui.Fairy, ref y);
         ToggleRow("Snowplough comes by itself", Ui.PloughOn, Ui.Plough, ref y);
@@ -3186,6 +3300,7 @@ static unsafe class Program
                 {
                     ReleaseCapture();
                     world.MouseUp();
+                    if (Cfg.Tree) SaveSettings();   // the tree stays where you let go of it
                 }
                 return IntPtr.Zero;
             case WM_CAPTURECHANGED:

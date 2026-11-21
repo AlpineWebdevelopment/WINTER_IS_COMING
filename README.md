@@ -61,6 +61,8 @@ dotnet run -c Release
 
 **Left-click the ❄ icon** near the clock and a little panel opens with everything in it: the switch, the snow amount, the wind, snowballs, fairy lights, the snowplough and whether it starts with Windows. **Ctrl+Alt+S** stops and starts the snow from anywhere without opening anything, and right-clicking the icon still gives you the plain menu. If you can't see the ❄, it's under the **^** arrow in the tray — drag it out onto the taskbar and it stays there.
 
+**A Christmas tree** 🎄 — switch it on in the panel and one goes up in the snow, trimmed with baubles and a lit star. Take hold of it and drag it along the bottom of the screen; it stays where you let go, next time too. Grabbing it does not reach down onto the taskbar, so the buttons under it still work.
+
 **Screenshots** 📷 — the snow keeps falling on your screen but stays out of anything you capture: PrintScreen, the Snipping Tool, a recording, a shared screen. Turn *Keep out of screenshots* off in the panel if you do want it in the picture. Needs Windows 10 version 2004 or newer.
 
 Whatever you pick there is remembered for next time. Tick **Start with Windows** in the same menu and it comes back on its own after a restart (`WinterIsComing.exe --autostart on` does the same from a script, `off` undoes it). Only the pause isn't remembered — coming back to a dead desktop looks like something is broken. You'll need the [.NET 8 SDK](https://dotnet.microsoft.com/download) (`winget install Microsoft.DotNet.SDK.8`).
