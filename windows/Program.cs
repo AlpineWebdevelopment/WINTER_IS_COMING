@@ -78,18 +78,33 @@ sealed class Pile
     public readonly float Width, MaxH;
     public readonly float[] H, Caps;  // current height / max height per column
     public readonly bool[] Occ;       // column hidden behind a window in front
+    public readonly float Seed;       // so two piles never get the same lumps
     public bool Dirty;
+
+    static int seedCounter;
+
+    /// A few sines at unrelated frequencies: a stable, non-repeating-looking ripple in the range ±1.
+    /// Column index in, so the lumps stay put while the pile lives and travel with it when it moves.
+    public static float Ripple(float u, float seed)
+        => 0.55f * MathF.Sin(u * 0.91f + seed)
+         + 0.30f * MathF.Sin(u * 2.13f + seed * 1.7f)
+         + 0.15f * MathF.Sin(u * 4.57f + seed * 2.9f);
 
     public Pile(float minX, float topY, float width, float maxH)
     {
         MinX = minX; TopY = topY; Width = width; MaxH = maxH;
         int n = Math.Max(1, (int)MathF.Ceiling(width / Cfg.ColW));
         H = new float[n]; Caps = new float[n]; Occ = new bool[n];
+        Seed = (seedCounter++ * 0.618f) % 6.283f;
         for (int i = 0; i < n; i++)
         {
             float edgeDist = MathF.Min(i + 0.5f, n - i - 0.5f) * Cfg.ColW;
             float t = MathF.Min(1, edgeDist / (maxH * 2.2f));
-            Caps[i] = maxH * MathF.Sqrt(t);   // taper at both ends so it looks rounded
+            // Every column used to fill to exactly maxH, so a pile that had filled up was a dead
+            // straight white bar. Giving each column its own ceiling keeps the top gently uneven
+            // even when it is full. The wave is slow enough that Relax() does not flatten it out.
+            float wave = 1 - 0.27f * (0.5f + 0.5f * Ripple(i * 0.22f, Seed));
+            Caps[i] = maxH * MathF.Sqrt(t) * wave;   // taper at both ends so it looks rounded
         }
     }
 
@@ -1045,37 +1060,74 @@ unsafe static class Render
         }
     }
 
-    // A pile: white mound above its edge with a thin blue-grey shadow just below it
+    // A pile: a lumpy mound above its edge, lit from the top-left and shaded towards the surface it
+    // rests on, with a thin blue-grey shadow just below it.
     public static void Pile(uint* buf, int bw, int bh, Pile p, float s)
     {
         int px0 = Math.Max(0, (int)MathF.Floor(p.MinX * s)), px1 = Math.Min(bw - 1, (int)MathF.Ceiling((p.MinX + p.Width) * s));
         float baseY = p.TopY * s;
-        for (int px = px0; px <= px1; px++)
+        float shEnd = baseY + 1.5f * s;
+        int yBase = Math.Min(bh, (int)MathF.Ceiling(baseY));
+
+        // Height of the drawn surface at a pixel column: the settled heights interpolated between
+        // column centres, plus fine lumps that are too small for the physics to carry but are what
+        // stops a filled-up pile looking like a ruled white bar.
+        float Surface(float px)
         {
-            // Interpolate the height between column centres for a smooth outline
             float u = ((px + 0.5f) / s - p.MinX) / Cfg.ColW - 0.5f;
             int c0 = (int)MathF.Floor(u);
             float fr = u - c0;
             int ca = Math.Clamp(c0, 0, p.Count - 1), cb = Math.Clamp(c0 + 1, 0, p.Count - 1);
-            if (p.Occ[fr < 0.5f ? ca : cb]) continue;
             float h = (p.H[ca] * (1 - fr) + p.H[cb] * fr) * s;
+            if (h <= 0.05f) return 0;
+            return MathF.Max(0, h + WinterIsComing.Pile.Ripple(u * 0.55f, p.Seed + 7) * MathF.Min(h * 0.20f, 2.0f * s));
+        }
+
+        for (int px = px0; px <= px1; px++)
+        {
+            float u = ((px + 0.5f) / s - p.MinX) / Cfg.ColW - 0.5f;
+            int c0 = (int)MathF.Floor(u);
+            int ca = Math.Clamp(c0, 0, p.Count - 1), cb = Math.Clamp(c0 + 1, 0, p.Count - 1);
+            if (p.Occ[u - c0 < 0.5f ? ca : cb]) continue;
+            float h = Surface(px);
             if (h < 0.3f * s) continue;
 
+            // Light from the top-left: the faces turned away from it go slightly grey. The slope is
+            // measured over a few pixels, not one — column to column it jumps about, and shading
+            // each column on its own turns the whole pile into vertical stripes.
+            float slope = (Surface(px + 3) - Surface(px - 3)) * -0.1667f;
+            float lum = (0.83f - 0.55f * slope) / MathF.Sqrt(slope * slope + 1);
+            float shade = Math.Clamp(0.80f + 0.25f * lum, 0.80f, 1f);
+
             float top = baseY - h;
-            // shadow: 1.5 logical px below the edge
-            float shEnd = baseY + 1.5f * s;
             for (int y = Math.Max(0, (int)MathF.Floor(baseY)); y < Math.Min(bh, (int)MathF.Ceiling(shEnd)); y++)
             {
                 float cov = MathF.Min(1, shEnd - y);
                 Blend(buf + (long)y * bw + px, 0.9f * cov, 0.70f, 0.78f, 0.92f);
             }
-            // body
             int yTop = (int)MathF.Floor(top);
-            for (int y = Math.Max(0, yTop); y < Math.Min(bh, (int)MathF.Ceiling(baseY)); y++)
+            float invH = 1f / MathF.Max(1f, h);
+            for (int y = Math.Max(0, yTop); y < yBase; y++)
             {
+                float v = Math.Clamp((y + 0.5f - top) * invH, 0, 1);
+                float t = v * v * 0.85f;                        // the crust near the surface stays white
                 float cov = y == yTop ? 1 - (top - yTop) : 1;   // anti-aliased top edge
-                Blend(buf + (long)y * bw + px, 0.97f * cov, 1, 1, 1);
+                // the slope only lights the crust; deeper down every column is the same, or the
+                // differences between neighbouring columns would read as stripes
+                float m = 1 - (1 - shade) * Math.Clamp(1 - v * 2.2f, 0, 1);
+                Blend(buf + (long)y * bw + px, 0.97f * cov,
+                      (1 - 0.26f * t) * m, (1 - 0.19f * t) * m, (1 - 0.07f * t) * m);
             }
+        }
+
+        // sparse grain, the same bluish specks the snowballs are made of
+        for (int c = 2; c < p.Count; c += 11)
+        {
+            if (p.Occ[c] || p.H[c] < 4) continue;
+            float g = WinterIsComing.Pile.Ripple(c * 1.7f, p.Seed + 3);
+            float depth = 0.35f + 0.3f * (0.5f + 0.5f * g);
+            FillCircle(buf, bw, bh, (p.ColX(c) + g * 1.1f) * s, baseY - p.H[c] * s * depth,
+                       MathF.Max(0.7f, (0.8f + 0.5f * g) * s), 0.72f, 0.78f, 0.91f, 0.42f);
         }
     }
 
