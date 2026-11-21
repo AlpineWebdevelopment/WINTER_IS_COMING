@@ -1,10 +1,12 @@
 // WinterIsComing for Windows — snow on your desktop.
 // Snow piles up on top of windows and on the taskbar, and flies off when you drag a window.
+// Slide the mouse sideways over the snow to roll a snowball, carry one with the left button,
+// and stack three of them into a snowman.
 // Pure Win32 + a tiny software renderer: no WinForms, no extra packages.
 //
 // Run:     dotnet run -c Release
 // Build:   dotnet publish -c Release -r win-x64   (or win-arm64) --self-contained -p:PublishSingleFile=true
-// A ❄ icon appears in the system tray (bottom right): pause / snow amount / clear / quit.
+// A ❄ icon appears in the system tray (bottom right): pause / snow amount / snowballs / clear / quit.
 
 using System;
 using System.Collections.Generic;
@@ -31,6 +33,10 @@ static class Cfg
     public const bool FlakesInFront = true;        // some of the smallest flakes fall in front of windows
     public const float InFrontFraction = 0.4f;     // share of the smallest layer that falls in front
     public const int FrameMs = 16;                 // timer interval (~60 fps)
+    public const float BallStart = 3;              // a new snowball starts this small
+    public const float BallMax = 28;               // and stops growing at this size
+    public const int MaxBalls = 20;                // oldest resting snowballs are removed beyond this
+    public static bool Snowballs = true;           // rolling snowballs and snowmen on / off
 }
 
 // Three depth layers: far = small, faint, slow; near = big, bright, fast
@@ -122,6 +128,45 @@ sealed class Pile
     public void Clear() { Array.Clear(H); Dirty = true; }
 }
 
+// MARK: - Snowball
+//
+// Rolled out of the snow by sliding the mouse sideways over a pile. Three stacked balls become a snowman.
+
+sealed class Snowball
+{
+    public float X, Y;              // centre, y grows downwards
+    public float R = Cfg.BallStart;
+    public float Vx, Vy;
+    public float Spin;              // rotation of the speck layer, so you can see the ball roll
+    public Pile Pile;               // the surface it rests on (null while falling, dragged or stacked)
+    public Snowball Below;          // the ball it is stacked on (snowman), if any
+    public bool Falling, Dragging, Hidden;
+    public int Decor;               // 0 = none, 1 = snowman head, 2 = snowman body
+
+    public const int SpeckCount = 30;
+    public readonly float[] Specks; // 4 floats per speck: angle, radius, size, alpha (in unit-disc space)
+
+    public Snowball()
+    {
+        Specks = new float[SpeckCount * 4];
+        for (int i = 0; i < SpeckCount; i++)
+        {
+            Specks[i * 4 + 0] = Rnd.F(0, 6.2832f);
+            Specks[i * 4 + 1] = MathF.Sqrt(Rnd.F(0, 1)) * 0.78f;   // even spread over the disc
+            Specks[i * 4 + 2] = Rnd.F(0.024f, 0.062f);
+            Specks[i * 4 + 3] = Rnd.F(0.25f, 0.55f);
+        }
+        Spin = Rnd.F(0, 6.2832f);
+    }
+
+    public void Drop(float vx, float vy)
+    {
+        Falling = true; Dragging = false; Hidden = false;
+        Pile = null; Below = null; Decor = 0;
+        Vx = vx; Vy = vy;
+    }
+}
+
 record struct Win(long Id, float L, float T, float R, float B)
 {
     public float Width => R - L;
@@ -150,6 +195,13 @@ sealed class SnowWorld
     float pollAcc, t;
     const long GroundId = -2;
 
+    // Snowballs
+    public readonly List<Snowball> Balls = new();
+    Snowball activeBall, dragBall;
+    float dragOffX, dragOffY, dragVx, dragVy;
+    float lastMx, lastMy;
+    bool haveMouse;
+
     public SnowWorld(float w, float h)
     {
         W = w; H = h;
@@ -174,6 +226,9 @@ sealed class SnowWorld
     {
         foreach (var p in Piles.Values) p.Clear();
         Ground.Clear();
+        Balls.Clear();
+        activeBall = null;
+        dragBall = null;
     }
 
     // MARK: Flake pool
@@ -231,6 +286,12 @@ sealed class SnowWorld
     // Turn a pile into falling clumps; (vx, vy) is the window's velocity, so faster drags fling snow farther
     void Release(Pile p, float vx, float vy, long id)
     {
+        // Snowballs resting on this surface are flung off too
+        foreach (var b in Balls)
+            if (b.Pile == p && !b.Falling && !b.Dragging)
+                b.Drop(Math.Clamp(vx * 0.5f, -700, 700) + Rnd.F(-40, 40),
+                       Math.Clamp(vy * 0.4f, -400, 300) - Rnd.F(40, 140));
+
         float total = p.Total;
         if (total > 0.5f)
         {
@@ -256,7 +317,7 @@ sealed class SnowWorld
 
     // MARK: Per-frame update
 
-    public void Update(float dt, Func<List<Win>> readWindows, Func<float?> readTaskbarTop)
+    public void Update(float dt, Func<List<Win>> readWindows, Func<float?> readTaskbarTop, float mx, float my)
     {
         t += dt;
         pollAcc += dt;
@@ -266,6 +327,19 @@ sealed class SnowWorld
             pollAcc = 0;
         }
         StepFlakes(dt);
+
+        if (Cfg.Snowballs)
+        {
+            if (dragBall != null) StepDrag(dragBall, dt, mx, my);
+            else UpdateRolling(mx, my);
+            StepBalls(dt);
+        }
+        else if (Balls.Count > 0)
+        {
+            Balls.Clear();
+            activeBall = null;
+            dragBall = null;
+        }
     }
 
     void PollWindows(float dt, List<Win> wins, float? taskbarTop)
@@ -422,6 +496,393 @@ sealed class SnowWorld
         int deficit = Math.Min(6, Cfg.TargetFlakes - normal);
         for (int k = 0; k < deficit; k++) SpawnFlake();
     }
+
+    // MARK: Snowballs — rolling
+
+    /// Is the mouse inside the snow band of this pile (a bit below the edge up to a bit above the snow)?
+    bool MouseOver(Pile p, float mx, float my)
+    {
+        int c = p.Col(mx);
+        if (c < 0 || p.Occ[c]) return false;
+        return my <= p.TopY + 6 && my >= p.TopY - p.H[c] - 14;
+    }
+
+    /// Which snow surface is the mouse hovering over? Taskbar first, then windows front to back, then the ground.
+    Pile SurfaceUnderMouse(float mx, float my)
+    {
+        // Hovering over a snowball counts as hovering over the snow it sits on. Without this, a big ball
+        // stops rolling as soon as the cursor rises above the thin snow band, which makes pushing jerky.
+        foreach (var b in Balls)
+        {
+            if (b.Falling || b.Dragging || b.Hidden || b.Below != null || b.Pile == null) continue;
+            if (MathF.Abs(mx - b.X) >= b.R + 8) continue;
+            if (my <= b.Pile.TopY + 6 && my >= b.Pile.TopY - 2 * b.R - 8) return b.Pile;
+        }
+        if (GroundIsTaskbar && MouseOver(Ground, mx, my)) return Ground;
+        foreach (var w in Order)
+        {
+            if (Piles.TryGetValue(w.Id, out var p) && MouseOver(p, mx, my)) return p;
+            if (w.Contains(mx, my)) return null;            // over a window's content
+        }
+        if (!GroundIsTaskbar && MouseOver(Ground, mx, my)) return Ground;
+        return null;
+    }
+
+    void UpdateRolling(float mx, float my)
+    {
+        if (!haveMouse) { haveMouse = true; lastMx = mx; lastMy = my; }
+        float dx = mx - lastMx;
+        lastMx = mx; lastMy = my;
+
+        var p = SurfaceUnderMouse(mx, my);
+        if (p == null) { activeBall = null; return; }
+        if (MathF.Abs(dx) <= 0.2f) return;
+
+        // Keep rolling the current ball, pick up a resting one under the mouse, or start a new one
+        if (activeBall != null && activeBall.Pile == p && !activeBall.Falling && !activeBall.Dragging
+            && Above(activeBall) == null && MathF.Abs(activeBall.X - (mx - dx)) < activeBall.R + 25)
+        {
+            // keep it
+        }
+        else
+        {
+            Snowball under = null;
+            foreach (var b in Balls)
+                if (!b.Falling && !b.Dragging && b.Pile == p && MathF.Abs(b.X - mx) < b.R + 10) { under = b; break; }
+
+            if (under != null)
+            {
+                if (Above(under) != null) { activeBall = null; return; }   // don't roll the bottom of a snowman
+                activeBall = under;
+            }
+            else
+            {
+                int c = p.Col(mx);
+                if (c < 0 || p.Occ[c] || p.H[c] <= 1.5f) { activeBall = null; return; }
+                var nb = new Snowball { X = mx, Pile = p };
+                nb.Y = p.TopY - nb.R + 1.5f;
+                Balls.Add(nb);
+                activeBall = nb;
+                TrimBalls();
+            }
+        }
+
+        var ball = activeBall;
+        if (ball == null) return;
+
+        // Move the ball to the mouse, staying on the surface
+        float lo = p.MinX + ball.R, hi = p.MinX + p.Width - ball.R;
+        float newX = lo < hi ? Math.Clamp(mx, lo, hi) : ball.X;
+        if (MathF.Abs(newX - ball.X) <= 0.01f) return;
+        float oldX = ball.X;
+        float dir = newX > ball.X ? 1 : -1;
+        Roll(ball, p, newX);
+        Push(ball, oldX, dir, p);
+    }
+
+    /// Roll a ball to newX: it picks up snow from the columns it passes over and grows
+    void Roll(Snowball b, Pile p, float newX)
+    {
+        float moved = newX - b.X;
+        if (MathF.Abs(moved) <= 0.01f) return;
+        if (b.R < Cfg.BallMax)
+        {
+            float collected = 0;
+            float from = MathF.Min(b.X, newX) - b.R * 0.8f;
+            float to = MathF.Max(b.X, newX) + b.R * 0.8f;
+            float frac = MathF.Min(0.6f, 0.6f * MathF.Abs(moved) / (1.6f * b.R));
+            int c0 = p.Col(MathF.Max(from, p.MinX)), c1 = p.Col(MathF.Min(to, p.MinX + p.Width - 0.1f));
+            if (c0 >= 0 && c1 >= 0 && c0 <= c1)
+            {
+                for (int c = c0; c <= c1; c++)
+                {
+                    if (p.Occ[c]) continue;
+                    float take = p.H[c] * frac;
+                    p.H[c] -= take;
+                    collected += take;
+                }
+                p.Dirty = true;
+            }
+            // Ball area grows by the snow area it picked up
+            float area = MathF.PI * b.R * b.R + collected * Cfg.ColW * 0.8f;
+            b.R = MathF.Min(Cfg.BallMax, MathF.Sqrt(area / MathF.PI));
+        }
+        b.X = newX;
+        b.Spin += moved / b.R;
+    }
+
+    /// The moving ball pushes any ball it touches in front of it; that ball can push the next one, and so on.
+    /// A ball pushed past the end of a surface falls off.
+    void Push(Snowball b, float oldX, float dir, Pile p)
+    {
+        // Look for balls ahead of where the pusher *was*: after a fast mouse move it may already have
+        // jumped past a ball, and that ball must still be pushed instead of being passed through.
+        var ahead = new List<Snowball>();
+        foreach (var o in Balls)
+            if (o != b && !o.Falling && !o.Dragging && o.Pile == p && (o.X - oldX) * dir > 0) ahead.Add(o);
+        if (ahead.Count == 0) return;
+        ahead.Sort((u, v) => MathF.Abs(u.X - oldX).CompareTo(MathF.Abs(v.X - oldX)));
+
+        var pusher = b;
+        foreach (var o in ahead)
+        {
+            float need = pusher.X + dir * (pusher.R + o.R);     // where o must be to just touch the pusher
+            if ((need - o.X) * dir <= 0) break;                 // not touching: the chain stops here
+            float lo = p.MinX + o.R, hi = p.MinX + p.Width - o.R;
+            if (need < lo || need > hi)
+            {
+                o.X = need;
+                o.Drop(dir * 140, -40);                         // pushed off the edge
+            }
+            else Roll(o, p, need);
+            pusher = o;
+        }
+    }
+
+    void TrimBalls()
+    {
+        while (Balls.Count > Cfg.MaxBalls)
+        {
+            int idx = -1;
+            for (int i = 0; i < Balls.Count; i++)
+            {
+                var b = Balls[i];
+                if (b.Falling || b.Dragging || b.Decor != 0 || b == activeBall) continue;
+                if (b.Below != null || Above(b) != null) continue;   // never break up a stack
+                idx = i;
+                break;
+            }
+            if (idx < 0) break;
+            Balls.RemoveAt(idx);
+        }
+    }
+
+    // MARK: Snowballs — stacking, dragging, physics
+
+    /// The visible, resting snowball under a point (top of a stack first)
+    public Snowball BallAt(float mx, float my)
+    {
+        Snowball best = null;
+        foreach (var b in Balls)
+        {
+            if (b.Falling || b.Hidden) continue;
+            float dx = mx - b.X, dy = my - b.Y;
+            if (dx * dx + dy * dy <= (b.R + 2) * (b.R + 2) && (best == null || b.Y < best.Y)) best = b;
+        }
+        return best;
+    }
+
+    /// The overlay normally lets every click through. Only while the mouse is over a snowball (or dragging one)
+    /// does it catch clicks, so you can grab the ball without clicking the window underneath.
+    public bool WantsMouse(float mx, float my) => Cfg.Snowballs && (dragBall != null || BallAt(mx, my) != null);
+
+    Snowball Above(Snowball b)
+    {
+        foreach (var x in Balls) if (x.Below == b) return x;
+        return null;
+    }
+
+    Snowball BaseOf(Snowball b)
+    {
+        int guard = 0;
+        while (b.Below != null && guard++ < 10) b = b.Below;
+        return b;
+    }
+
+    /// Balls in a stack from the bottom up
+    List<Snowball> StackFrom(Snowball baseBall)
+    {
+        var o = new List<Snowball> { baseBall };
+        Snowball a;
+        while (o.Count < 10 && (a = Above(o[o.Count - 1])) != null) o.Add(a);
+        return o;
+    }
+
+    public void MouseDown(float mx, float my)
+    {
+        if (!Cfg.Snowballs) return;
+        var b = BallAt(mx, my);
+        if (b == null) return;
+
+        // Anything stacked on top of the grabbed ball tumbles off
+        for (var a = Above(b); a != null;)
+        {
+            var next = Above(a);
+            a.Drop(Rnd.F(-50, 50), -Rnd.F(40, 100));
+            a = next;
+        }
+        ClearDecor(b);
+        b.Pile = null; b.Below = null; b.Falling = false; b.Dragging = true;
+        dragBall = b;
+        activeBall = null;
+        dragOffX = b.X - mx; dragOffY = b.Y - my;
+        dragVx = dragVy = 0;
+    }
+
+    public void MouseUp()
+    {
+        var b = dragBall;
+        if (b == null) return;
+        dragBall = null;
+        b.Dragging = false;
+
+        var target = StackTarget(b);
+        if (target != null)
+        {
+            b.Below = target;
+            b.Vx = b.Vy = 0;
+            var st = StackFrom(BaseOf(b));
+            if (st.Count == 3) MakeSnowman(st);
+        }
+        else
+        {
+            // Let go: it falls (with a bit of the throw) and lands on whatever is below
+            b.Drop(Math.Clamp(dragVx * 0.5f, -600, 600), Math.Clamp(dragVy * 0.5f, -400, 400));
+        }
+    }
+
+    void StepDrag(Snowball b, float dt, float mx, float my)
+    {
+        float tx = mx + dragOffX, ty = my + dragOffY;
+        if (dt > 0)
+        {
+            float vx = (tx - b.X) / dt, vy = (ty - b.Y) / dt;
+            dragVx = dragVx * 0.7f + vx * 0.3f;
+            dragVy = dragVy * 0.7f + vy * 0.3f;
+        }
+        b.Spin += (tx - b.X) / b.R;
+        b.X = tx; b.Y = ty;
+        lastMx = mx; lastMy = my;
+    }
+
+    /// A ball dropped just above another ball (that isn't already a full snowman) gets stacked on it
+    Snowball StackTarget(Snowball b)
+    {
+        Snowball best = null;
+        float bestDist = float.MaxValue;
+        foreach (var c in Balls)
+        {
+            if (c == b || c.Falling || c.Dragging || c.Hidden) continue;
+            if (Above(c) != null || StackFrom(BaseOf(c)).Count >= 3) continue;
+            float dx = MathF.Abs(b.X - c.X), dy = c.Y - b.Y;      // b must sit above c
+            if (dx >= c.R * 0.9f + b.R * 0.3f || dy <= 0 || dy >= c.R + b.R + 30) continue;
+            if (dx < bestDist) { best = c; bestDist = dx; }
+        }
+        return best;
+    }
+
+    void ClearDecor(Snowball b)
+    {
+        foreach (var x in StackFrom(BaseOf(b))) x.Decor = 0;
+    }
+
+    /// Three stacked balls become a snowman: face and scarf on the head, buttons and stick arms on the body
+    void MakeSnowman(List<Snowball> st)
+    {
+        st[0].Decor = 0;
+        st[1].Decor = 2;   // body
+        st[2].Decor = 1;   // head
+    }
+
+    void StepBalls(float dt)
+    {
+        for (int i = Balls.Count - 1; i >= 0; i--)
+        {
+            var b = Balls[i];
+            bool gone = false;
+
+            if (b.Falling)
+            {
+                b.Decor = 0;
+                b.Hidden = false;
+                float prevBottom = b.Y + b.R;
+                b.Vy += Cfg.Gravity * dt;
+                b.X += b.Vx * dt;
+                b.Y += b.Vy * dt;
+                b.Spin += b.Vx * dt / b.R;
+                if (b.Vy > 0)
+                {
+                    var p = LandingSurface(b.X, prevBottom, b.Y + b.R);
+                    if (p != null) { Splat(b, p); gone = true; }   // falling snowballs burst into a heap of snow
+                }
+                if (!gone && (b.Y > H + b.R * 2 || b.X < -100 || b.X > W + 100)) gone = true;
+            }
+            else if (b.Dragging)
+            {
+                b.Hidden = false;   // position is set by StepDrag
+            }
+            else if (b.Below != null)
+            {
+                var u = b.Below;
+                if (u.Falling || u.Dragging)
+                    b.Drop(u.Vx + Rnd.F(-40, 40), MathF.Min(u.Vy, 0) - Rnd.F(30, 80));
+                else
+                {
+                    b.X = u.X;
+                    b.Y = u.Y - u.R - b.R * 0.82f;   // sits slightly sunk into the ball below
+                    b.Hidden = u.Hidden;
+                }
+            }
+            else if (b.Pile != null)
+            {
+                int c = b.Pile.Col(b.X);
+                b.Hidden = c < 0 || b.Pile.Occ[c];   // hidden behind a window in front
+                b.Y = b.Pile.TopY - b.R + 1.5f;      // sits slightly sunk into the snow
+            }
+            else b.Drop(0, 0);                       // lost its support
+
+            if (gone)
+            {
+                if (activeBall == b) activeBall = null;
+                Balls.RemoveAt(i);
+            }
+        }
+    }
+
+    /// First surface a falling ball hits between two heights: the taskbar, then window tops (front to back),
+    /// then the bottom of the screen. Returns null if it hits nothing this frame.
+    Pile LandingSurface(float x, float prevBottom, float newBottom)
+    {
+        bool Crosses(Pile p)
+        {
+            int c = p.Col(x);
+            if (c < 0 || p.Occ[c]) return false;
+            float s = p.Surface(c);
+            return prevBottom <= s && newBottom > s;
+        }
+        if (GroundIsTaskbar && Crosses(Ground)) return Ground;
+        foreach (var w in Order)
+            if (Piles.TryGetValue(w.Id, out var p) && Crosses(p)) return p;
+        // The ground catches everything that reaches the bottom, even where a window covers it
+        int gc = Ground.Col(x);
+        if (gc >= 0 && newBottom > Ground.Surface(gc)) return Ground;
+        return null;
+    }
+
+    /// A falling ball bursts where it lands: its snow becomes a mound on that surface, plus a puff of powder
+    void Splat(Snowball b, Pile p)
+    {
+        int c0 = p.Col(b.X);
+        if (c0 >= 0)
+        {
+            float snow = MathF.PI * b.R * b.R * 0.7f / Cfg.ColW;   // ball area -> total column height
+            int half = Math.Max(2, (int)(b.R * 1.4f / Cfg.ColW));
+            float sum = 0;
+            for (int o = -half; o <= half; o++) sum += 1 - MathF.Abs((float)o) / (half + 1f);
+            for (int o = -half; o <= half; o++)
+            {
+                int i = c0 + o;
+                if (i < 0 || i >= p.Count || p.Occ[i]) continue;
+                float w = (1 - MathF.Abs((float)o) / (half + 1f)) / sum;
+                p.H[i] = MathF.Min(p.Caps[i], p.H[i] + snow * w);
+            }
+            p.Dirty = true;
+        }
+        int n = Math.Min(14, (int)(b.R * 0.6f) + 2);
+        for (int k = 0; k < n; k++)
+            SpawnClump(b.X + Rnd.F(-b.R, b.R), b.Y + b.R * 0.5f - Rnd.F(0, b.R * 0.5f),
+                       b.Vx * 0.2f + Rnd.F(-90, 90), -Rnd.F(60, 180), -3);
+    }
 }
 
 // MARK: - Software renderer into a premultiplied BGRA buffer
@@ -496,13 +957,216 @@ unsafe static class Render
         }
     }
 
+    // MARK: Shape primitives (anti-aliased, used for snowballs and snowman decorations)
+
+    public static void FillCircle(uint* buf, int bw, int bh, float cx, float cy, float r,
+                                  float cr, float cg, float cb, float alpha)
+    {
+        if (r <= 0) return;
+        int x0 = Math.Max(0, (int)MathF.Floor(cx - r - 1)), x1 = Math.Min(bw - 1, (int)MathF.Ceiling(cx + r + 1));
+        int y0 = Math.Max(0, (int)MathF.Floor(cy - r - 1)), y1 = Math.Min(bh - 1, (int)MathF.Ceiling(cy + r + 1));
+        for (int y = y0; y <= y1; y++)
+        {
+            uint* row = buf + (long)y * bw;
+            float dy = y + 0.5f - cy;
+            for (int x = x0; x <= x1; x++)
+            {
+                float dx = x + 0.5f - cx;
+                float cov = Math.Clamp(r - MathF.Sqrt(dx * dx + dy * dy) + 0.5f, 0, 1);
+                if (cov > 0) Blend(row + x, cov * alpha, cr, cg, cb);
+            }
+        }
+    }
+
+    /// Line segment with round caps — the snowman's stick arms
+    public static void FillSegment(uint* buf, int bw, int bh, float ax, float ay, float bx, float by, float half,
+                                   float cr, float cg, float cb, float alpha)
+    {
+        int x0 = Math.Max(0, (int)MathF.Floor(MathF.Min(ax, bx) - half - 1));
+        int x1 = Math.Min(bw - 1, (int)MathF.Ceiling(MathF.Max(ax, bx) + half + 1));
+        int y0 = Math.Max(0, (int)MathF.Floor(MathF.Min(ay, by) - half - 1));
+        int y1 = Math.Min(bh - 1, (int)MathF.Ceiling(MathF.Max(ay, by) + half + 1));
+        float ex = bx - ax, ey = by - ay;
+        float len2 = MathF.Max(1e-5f, ex * ex + ey * ey);
+        for (int y = y0; y <= y1; y++)
+        {
+            uint* row = buf + (long)y * bw;
+            for (int x = x0; x <= x1; x++)
+            {
+                float px = x + 0.5f - ax, py = y + 0.5f - ay;
+                float tt = Math.Clamp((px * ex + py * ey) / len2, 0, 1);
+                float qx = px - ex * tt, qy = py - ey * tt;
+                float cov = Math.Clamp(half - MathF.Sqrt(qx * qx + qy * qy) + 0.5f, 0, 1);
+                if (cov > 0) Blend(row + x, cov * alpha, cr, cg, cb);
+            }
+        }
+    }
+
+    /// Convex polygon, optionally rounded off by `round` (pass the inset outline to get a rounded rect)
+    public static void FillPoly(uint* buf, int bw, int bh, float[] vx, float[] vy, int n, float round,
+                                float cr, float cg, float cb, float alpha)
+    {
+        float minX = float.MaxValue, maxX = float.MinValue, minY = float.MaxValue, maxY = float.MinValue;
+        float area = 0;
+        for (int i = 0; i < n; i++)
+        {
+            minX = MathF.Min(minX, vx[i]); maxX = MathF.Max(maxX, vx[i]);
+            minY = MathF.Min(minY, vy[i]); maxY = MathF.Max(maxY, vy[i]);
+            int j = (i + 1) % n;
+            area += vx[i] * vy[j] - vx[j] * vy[i];
+        }
+        float sign = area >= 0 ? 1 : -1;      // so the normals point outwards whichever way it was wound
+        int x0 = Math.Max(0, (int)MathF.Floor(minX - round - 1)), x1 = Math.Min(bw - 1, (int)MathF.Ceiling(maxX + round + 1));
+        int y0 = Math.Max(0, (int)MathF.Floor(minY - round - 1)), y1 = Math.Min(bh - 1, (int)MathF.Ceiling(maxY + round + 1));
+        for (int y = y0; y <= y1; y++)
+        {
+            uint* row = buf + (long)y * bw;
+            for (int x = x0; x <= x1; x++)
+            {
+                float px = x + 0.5f, py = y + 0.5f;
+                float d = float.MinValue;
+                for (int i = 0; i < n; i++)
+                {
+                    int j = (i + 1) % n;
+                    float ex = vx[j] - vx[i], ey = vy[j] - vy[i];
+                    float len = MathF.Max(1e-5f, MathF.Sqrt(ex * ex + ey * ey));
+                    float nx = sign * ey / len, ny = -sign * ex / len;
+                    d = MathF.Max(d, (px - vx[i]) * nx + (py - vy[i]) * ny);
+                }
+                float cov = Math.Clamp(round - d + 0.5f, 0, 1);
+                if (cov > 0) Blend(row + x, cov * alpha, cr, cg, cb);
+            }
+        }
+    }
+
+    // MARK: Snowballs
+
+    static readonly float[] polyX = new float[4], polyY = new float[4];
+
+    static void Rect(uint* buf, int bw, int bh, float cx, float cy, float x0, float y0, float x1, float y1,
+                     float round, float rot, float cr, float cg, float cb)
+    {
+        float cs = MathF.Cos(rot), sn = MathF.Sin(rot);
+        // inset by `round` so the rounded-off outline matches the requested rectangle
+        float ix0 = x0 + round, iy0 = y0 + round, ix1 = x1 - round, iy1 = y1 - round;
+        if (ix1 < ix0) { ix0 = ix1 = (x0 + x1) * 0.5f; }
+        if (iy1 < iy0) { iy0 = iy1 = (y0 + y1) * 0.5f; }
+        float[] lx = { ix0, ix1, ix1, ix0 }, ly = { iy0, iy0, iy1, iy1 };
+        for (int i = 0; i < 4; i++)
+        {
+            polyX[i] = cx + lx[i] * cs - ly[i] * sn;
+            polyY[i] = cy + lx[i] * sn + ly[i] * cs;
+        }
+        FillPoly(buf, bw, bh, polyX, polyY, 4, round, cr, cg, cb, 1);
+    }
+
+    /// A snowball: lit from the top-left, bluish shade at the bottom-right, with specks that rotate as it rolls
+    public static void Ball(uint* buf, int bw, int bh, Snowball ball, float s)
+    {
+        float cx = ball.X * s, cy = ball.Y * s, r = ball.R * s;
+        if (r < 0.5f) return;
+        int x0 = Math.Max(0, (int)MathF.Floor(cx - r - 1)), x1 = Math.Min(bw - 1, (int)MathF.Ceiling(cx + r + 1));
+        int y0 = Math.Max(0, (int)MathF.Floor(cy - r - 1)), y1 = Math.Min(bh - 1, (int)MathF.Ceiling(cy + r + 1));
+        float lx = cx - 0.24f * r, ly = cy - 0.28f * r;     // where the light comes from
+        float invEnd = 1f / (1.1f * r);
+        for (int y = y0; y <= y1; y++)
+        {
+            uint* row = buf + (long)y * bw;
+            for (int x = x0; x <= x1; x++)
+            {
+                float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+                float cov = Math.Clamp(r - MathF.Sqrt(dx * dx + dy * dy) + 0.5f, 0, 1);
+                if (cov <= 0) continue;
+                float ex = x + 0.5f - lx, ey = y + 0.5f - ly;
+                float tt = Math.Clamp(MathF.Sqrt(ex * ex + ey * ey) * invEnd, 0, 1);
+                float cr, cg, cb;
+                if (tt < 0.55f) { float u = tt / 0.55f; cr = 1 - 0.06f * u; cg = 1 - 0.04f * u; cb = 1; }
+                else { float u = (tt - 0.55f) / 0.45f; cr = 0.94f - 0.26f * u; cg = 0.96f - 0.21f * u; cb = 1 - 0.12f * u; }
+                Blend(row + x, cov, cr, cg, cb);
+            }
+        }
+
+        float rc = MathF.Cos(ball.Spin), rs = MathF.Sin(ball.Spin);
+        for (int i = 0; i < Snowball.SpeckCount; i++)
+        {
+            float a = ball.Specks[i * 4], rad = ball.Specks[i * 4 + 1];
+            float sz = ball.Specks[i * 4 + 2], al = ball.Specks[i * 4 + 3];
+            float ux = MathF.Cos(a) * rad, uy = MathF.Sin(a) * rad;
+            float px = cx + (ux * rc - uy * rs) * r, py = cy + (ux * rs + uy * rc) * r;
+            FillCircle(buf, bw, bh, px, py, MathF.Max(0.6f, sz * r), 0.66f, 0.73f, 0.87f, al);
+        }
+    }
+
+    /// Snowman trimmings: face and scarf on the head ball, buttons and stick arms on the body ball
+    public static void Decor(uint* buf, int bw, int bh, Snowball ball, float s)
+    {
+        float cx = ball.X * s, cy = ball.Y * s, R = ball.R * s;
+        const float darkR = 0.08f, darkG = 0.08f, darkB = 0.08f;
+
+        if (ball.Decor == 1)
+        {
+            // eyes
+            FillCircle(buf, bw, bh, cx - R * 0.30f, cy - R * 0.22f, MathF.Max(1, R * 0.09f), darkR, darkG, darkB, 1);
+            FillCircle(buf, bw, bh, cx + R * 0.30f, cy - R * 0.22f, MathF.Max(1, R * 0.09f), darkR, darkG, darkB, 1);
+            // carrot nose
+            polyX[0] = cx + R * 0.02f; polyY[0] = cy - R * 0.06f;
+            polyX[1] = cx + R * 0.75f; polyY[1] = cy + R * 0.04f;
+            polyX[2] = cx + R * 0.02f; polyY[2] = cy + R * 0.12f;
+            FillPoly(buf, bw, bh, polyX, polyY, 3, 0, 0.96f, 0.52f, 0.13f, 1);
+            // mouth
+            for (int k = 0; k < 5; k++)
+            {
+                float a = MathF.PI * (1.2f + 0.15f * k);
+                FillCircle(buf, bw, bh, cx + MathF.Cos(a) * R * 0.42f, cy - MathF.Sin(a) * R * 0.42f + R * 0.05f,
+                           MathF.Max(0.7f, R * 0.05f), darkR, darkG, darkB, 1);
+            }
+            // scarf and its tail
+            Rect(buf, bw, bh, cx, cy, -R * 0.85f, R * 0.68f, R * 0.85f, R * 0.98f, R * 0.12f, 0, 0.82f, 0.16f, 0.18f);
+            Rect(buf, bw, bh, cx, cy, R * 0.30f, R * 0.85f, R * 0.58f, R * 1.55f, R * 0.08f, 0.15f, 0.82f, 0.16f, 0.18f);
+        }
+        else if (ball.Decor == 2)
+        {
+            float B = R;
+            for (int k = 0; k < 3; k++)
+                FillCircle(buf, bw, bh, cx, cy + B * (0.33f * k - 0.35f), MathF.Max(0.8f, B * 0.07f),
+                           darkR, darkG, darkB, 1);
+            float lw = MathF.Max(1.2f, B * 0.09f) * 0.5f;
+            for (int k = 0; k < 2; k++)
+            {
+                float sx = k == 0 ? -1 : 1;
+                FillSegment(buf, bw, bh, cx + sx * B * 0.85f, cy - B * 0.15f,
+                            cx + sx * B * 1.75f, cy - B * 0.65f, lw, 0.42f, 0.28f, 0.16f, 1);
+                FillSegment(buf, bw, bh, cx + sx * B * 1.40f, cy - B * 0.45f,
+                            cx + sx * B * 1.55f, cy - B * 0.85f, lw, 0.42f, 0.28f, 0.16f, 1);
+            }
+        }
+    }
+
+    static readonly List<Snowball> drawList = new();
+
     public static void World(uint* buf, int bw, int bh, SnowWorld w, float s)
     {
         new Span<uint>(buf, bw * bh).Clear();
-        // far + middle flakes, then piles, then near flakes and clumps on top
+        // far + middle flakes, then piles, then snowballs, then near flakes and clumps on top
         foreach (var f in w.Flakes) if (!f.Clump && f.Layer < 2) Disc(buf, bw, bh, f.X * s, f.Y * s, f.Size * 1.1f * s, f.Alpha);
         foreach (var p in w.Piles.Values) Pile(buf, bw, bh, p, s);
         Pile(buf, bw, bh, w.Ground, s);
+
+        if (w.Balls.Count > 0)
+        {
+            drawList.Clear();
+            drawList.AddRange(w.Balls);
+            drawList.Sort((a, b) => b.Y.CompareTo(a.Y));   // lower on screen first, so a head covers its body
+            foreach (var ball in drawList)
+            {
+                if (ball.Hidden || ball.Dragging) continue;
+                Ball(buf, bw, bh, ball, s);
+                if (ball.Decor != 0) Decor(buf, bw, bh, ball, s);
+            }
+            foreach (var ball in drawList)                 // the ball in your hand goes on top
+                if (ball.Dragging && !ball.Hidden) Ball(buf, bw, bh, ball, s);
+        }
+
         foreach (var f in w.Flakes) if (f.Clump || f.Layer == 2) Disc(buf, bw, bh, f.X * s, f.Y * s, f.Size * 1.1f * s, f.Alpha);
     }
 
@@ -542,7 +1206,8 @@ static unsafe class Program
                WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
     const int GWL_EXSTYLE = -20;
     const uint WM_DESTROY = 0x2, WM_TIMER = 0x113, WM_DISPLAYCHANGE = 0x7E, WM_NULL = 0,
-               WM_APP = 0x8000, WM_LBUTTONUP = 0x202, WM_RBUTTONUP = 0x205;
+               WM_APP = 0x8000, WM_MOUSEMOVE = 0x200, WM_LBUTTONDOWN = 0x201, WM_LBUTTONUP = 0x202,
+               WM_RBUTTONUP = 0x205, WM_CAPTURECHANGED = 0x215;
     const uint WM_TRAY = WM_APP + 1;
     const int SW_HIDE = 0, SW_SHOWNOACTIVATE = 4;
     const uint ULW_ALPHA = 2;
@@ -550,7 +1215,8 @@ static unsafe class Program
     const uint NIM_ADD = 0, NIM_DELETE = 2, NIF_MESSAGE = 1, NIF_ICON = 2, NIF_TIP = 4;
     const uint MF_STRING = 0, MF_CHECKED = 8, MF_POPUP = 0x10, MF_SEPARATOR = 0x800;
     const uint TPM_RIGHTBUTTON = 0x2, TPM_RETURNCMD = 0x100;
-    const int CMD_PAUSE = 1, CMD_CLEAR = 2, CMD_QUIT = 3, CMD_LIGHT = 10, CMD_MEDIUM = 11, CMD_HEAVY = 12;
+    const int CMD_PAUSE = 1, CMD_CLEAR = 2, CMD_QUIT = 3, CMD_BALLS = 4,
+              CMD_LIGHT = 10, CMD_MEDIUM = 11, CMD_HEAVY = 12;
 
     // --- structs
     [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
@@ -612,6 +1278,9 @@ static unsafe class Program
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
     [DllImport("user32.dll")] static extern IntPtr GetWindowLongPtrW(IntPtr hWnd, int index);
+    [DllImport("user32.dll")] static extern IntPtr SetWindowLongPtrW(IntPtr hWnd, int index, IntPtr value);
+    [DllImport("user32.dll")] static extern IntPtr SetCapture(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool ReleaseCapture();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr hWnd, StringBuilder sb, int max);
     [DllImport("user32.dll")] static extern int GetWindowTextLengthW(IntPtr hWnd);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hWnd, out RECT rc);
@@ -646,6 +1315,7 @@ static unsafe class Program
     static readonly Stopwatch clock = Stopwatch.StartNew();
     static double lastT;
     static bool paused;
+    static bool clickThrough = true;          // WS_EX_TRANSPARENT currently set?
     static readonly List<Win> found = new();
     static readonly StringBuilder clsName = new(64);
 
@@ -731,8 +1401,38 @@ static unsafe class Program
                 uint ev = (uint)(lParam.ToInt64() & 0xFFFF);
                 if (ev == WM_RBUTTONUP || ev == WM_LBUTTONUP) ShowMenu();
                 return IntPtr.Zero;
+            case WM_LBUTTONDOWN:
+                // Only reaches us while the cursor is over a snowball (see SetClickThrough)
+                if (hWnd == overlay && !paused)
+                {
+                    GetCursorPos(out POINT dp);
+                    world.MouseDown(dp.X / scale, dp.Y / scale);
+                    SetCapture(overlay);
+                }
+                return IntPtr.Zero;
+            case WM_LBUTTONUP:
+                if (hWnd == overlay)
+                {
+                    ReleaseCapture();
+                    world.MouseUp();
+                }
+                return IntPtr.Zero;
+            case WM_CAPTURECHANGED:
+                if (hWnd == overlay) world.MouseUp();   // something else grabbed the mouse: drop the ball
+                return IntPtr.Zero;
         }
         return DefWindowProcW(hWnd, msg, wParam, lParam);
+    }
+
+    // The overlay normally lets every click through. Only while the mouse is over a snowball
+    // (or dragging one) does it catch clicks, so you can grab the ball without clicking the window underneath.
+    static void SetClickThrough(bool on)
+    {
+        if (on == clickThrough) return;
+        clickThrough = on;
+        long ex = GetWindowLongPtrW(overlay, GWL_EXSTYLE).ToInt64();
+        ex = on ? ex | WS_EX_TRANSPARENT : ex & ~(long)WS_EX_TRANSPARENT;
+        SetWindowLongPtrW(overlay, GWL_EXSTYLE, (IntPtr)ex);
     }
 
     static void Tick()
@@ -742,7 +1442,11 @@ static unsafe class Program
         lastT = now;
         if (paused) return;
 
-        world.Update(dt, ReadWindows, ReadTaskbarTop);
+        GetCursorPos(out POINT mp);
+        float mx = mp.X / scale, my = mp.Y / scale;
+
+        world.Update(dt, ReadWindows, ReadTaskbarTop, mx, my);
+        SetClickThrough(!world.WantsMouse(mx, my));
         Render.World((uint*)bits, bw, bh, world, scale);
 
         var dst = new POINT();
@@ -835,6 +1539,7 @@ static unsafe class Program
         AppendMenuW(amount, MF_STRING | (Cfg.TargetFlakes == 260 ? MF_CHECKED : 0), (UIntPtr)CMD_MEDIUM, "Medium");
         AppendMenuW(amount, MF_STRING | (Cfg.TargetFlakes == 500 ? MF_CHECKED : 0), (UIntPtr)CMD_HEAVY, "Heavy");
         AppendMenuW(menu, MF_POPUP, (UIntPtr)(ulong)amount.ToInt64(), "Snow amount");
+        AppendMenuW(menu, MF_STRING | (Cfg.Snowballs ? MF_CHECKED : 0), (UIntPtr)CMD_BALLS, "Snowballs && snowmen");
         AppendMenuW(menu, MF_STRING, (UIntPtr)CMD_CLEAR, "Clear snow");
         AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, null);
         AppendMenuW(menu, MF_STRING, (UIntPtr)CMD_QUIT, "Quit");
@@ -849,7 +1554,12 @@ static unsafe class Program
         {
             case CMD_PAUSE:
                 paused = !paused;
+                if (paused) { world.MouseUp(); SetClickThrough(true); }
                 ShowWindow(overlay, paused ? SW_HIDE : SW_SHOWNOACTIVATE);
+                break;
+            case CMD_BALLS:
+                Cfg.Snowballs = !Cfg.Snowballs;
+                if (!Cfg.Snowballs) SetClickThrough(true);
                 break;
             case CMD_LIGHT: Cfg.TargetFlakes = 120; break;
             case CMD_MEDIUM: Cfg.TargetFlakes = 260; break;
