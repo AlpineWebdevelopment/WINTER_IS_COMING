@@ -1816,11 +1816,19 @@ unsafe static class Render
 
     /// The heap being shoved along in front of the blade: a lumpy mound, lit from the top-left and
     /// shaded towards the ground, drawn column by column so its base sits flat on the snow line.
-    static void PlowHeap(uint* buf, int bw, int bh, Snowplow p, float gy, float k, float d, float back, float s)
+    static void PlowHeap(uint* buf, int bw, int bh, Snowplow p, float gy, float k, float d, float back, float s,
+                         float lightBg)
     {
         float hh = MathF.Min(18, MathF.Sqrt(p.Heap) * 0.95f) * k;
         if (hh < 1.5f) return;
         float hw = hh * 2.6f;
+
+        // The heap is the same snow as the piles, so it takes the same colours: blue in shadow over
+        // a dark desktop, neutral with a cool grey edge over a white page.
+        float fadeR = 0.30f - 0.13f * lightBg;
+        float fadeG = 0.22f - 0.07f * lightBg;
+        float fadeB = 0.09f + 0.04f * lightBg;
+        float rimDepth = MathF.Max(2.2f, 3.0f * s);
 
         float Height(float u)
         {
@@ -1858,11 +1866,14 @@ unsafe static class Render
                 float v = Math.Clamp((y + 0.5f - top) * invH, 0, 1);
                 float t = v * v * 0.9f;
                 float cov = y == yTop ? MathF.Min(1, 1 - (top - yTop)) : 1;
+                float sr = (1 - fadeR * t) * shade, sg = (1 - fadeG * t) * shade, sb = (1 - fadeB * t) * shade;
+                float rim = Math.Clamp(1 - (y + 0.5f - top) / rimDepth, 0, 1) * 0.95f * lightBg;
                 Blend(buf + (long)y * bw + px, 0.97f * cov,
-                      (1 - 0.30f * t) * shade, (1 - 0.22f * t) * shade, (1 - 0.09f * t) * shade);
+                      sr + (0.55f - sr) * rim, sg + (0.58f - sg) * rim, sb + (0.64f - sb) * rim);
             }
             for (int y = Math.Max(0, (int)MathF.Floor(gy)); y < Math.Min(bh, (int)MathF.Ceiling(shEnd)); y++)
-                Blend(buf + (long)y * bw + px, 0.85f * MathF.Min(1, shEnd - y), 0.70f, 0.78f, 0.92f);
+                Blend(buf + (long)y * bw + px, (0.85f - 0.1f * lightBg) * MathF.Min(1, shEnd - y),
+                      0.70f - 0.08f * lightBg, 0.78f - 0.12f * lightBg, 0.92f - 0.25f * lightBg);
         }
 
         for (int i = 0; i < heapSpecks.Length; i += 3)
@@ -1871,7 +1882,8 @@ unsafe static class Render
             float h = Height(u);
             if (h < 3) continue;
             FillCircle(buf, bw, bh, back + d * u * hw, gy - h * v,
-                       MathF.Max(0.7f, heapSpecks[i + 2] * hh), 0.70f, 0.76f, 0.90f, 0.5f);
+                       MathF.Max(0.7f, heapSpecks[i + 2] * hh),
+                       0.70f + 0.02f * lightBg, 0.76f - 0.02f * lightBg, 0.90f - 0.16f * lightBg, 0.5f);
         }
 
         // a couple of clods that have tumbled off the front of the heap
@@ -1881,18 +1893,19 @@ unsafe static class Render
             if (r < 1.1f) continue;
             float cx = back + d * hw * (i == 0 ? 1.07f : 1.19f), cy = gy - r * 0.9f;
             FillCircle(buf, bw, bh, cx, cy, r, 0.99f, 0.99f, 1f, 0.97f);
-            FillCircle(buf, bw, bh, cx + r * 0.3f, cy + r * 0.28f, r * 0.6f, 0.80f, 0.85f, 0.94f, 0.55f);
+            FillCircle(buf, bw, bh, cx + r * 0.3f, cy + r * 0.28f, r * 0.6f,
+                       0.80f - 0.06f * lightBg, 0.85f - 0.10f * lightBg, 0.94f - 0.22f * lightBg, 0.55f);
         }
     }
 
-    public static void PlowTruck(uint* buf, int bw, int bh, Snowplow p, float groundTop, float s)
+    public static void PlowTruck(uint* buf, int bw, int bh, Snowplow p, float groundTop, float s, float lightBg)
     {
         float d = p.Dir, gy = groundTop * s, k = Snowplow.Scale * s;
         float SX(float lx) => p.X * s + d * lx * k;   // local x: 0 is the blade tip, negative is behind
         float SY(float ly) => gy + ly * k;            // local y: 0 is the ground, negative is up
         float o = MathF.Max(0.75f, 0.55f * k);        // outline thickness
 
-        PlowHeap(buf, bw, bh, p, gy, k, d, SX(-5.8f), s);
+        PlowHeap(buf, bw, bh, p, gy, k, d, SX(-5.8f), s, lightBg);
 
         // soft shadow on the ground under the truck
         GradBox(buf, bw, bh, SX(-42), SX(-5), SY(-1.4f), SY(1.6f), 1.5f * k, 0.04f, 0.05f, 0.10f, 0.04f, 0.05f, 0.10f, 0.20f);
@@ -2099,7 +2112,7 @@ unsafe static class Render
         int x1 = Math.Min(bw - 1, (int)MathF.Ceiling((p.X + 300) * s));
         int y0 = Math.Max(0, (int)MathF.Floor((w.Ground.TopY - 95) * s));
         int y1 = Math.Min(bh - 1, (int)MathF.Ceiling((w.Ground.TopY + 8) * s));
-        if (x1 < x0 || y1 < y0) { PlowTruck(buf, bw, bh, p, w.Ground.TopY, s); return; }
+        if (x1 < x0 || y1 < y0) { PlowTruck(buf, bw, bh, p, w.Ground.TopY, s, w.Ground.BgLight); return; }
 
         int cols = x1 - x0 + 1, rows = y1 - y0 + 1;
         if (plowSave.Length < cols * rows) plowSave = new uint[cols * rows];
@@ -2113,7 +2126,7 @@ unsafe static class Render
             for (int y = y0; y <= y1; y++) plowSave[(x - x0) * rows + (y - y0)] = buf[(long)y * bw + x];
         }
 
-        PlowTruck(buf, bw, bh, p, w.Ground.TopY, s);
+        PlowTruck(buf, bw, bh, p, w.Ground.TopY, s, w.Ground.BgLight);
         if (!any) return;
 
         for (int x = x0; x <= x1; x++)
