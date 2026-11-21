@@ -187,7 +187,7 @@ sealed class Snowplow
     public float Wheel;         // wheel rotation
 
     public const float Speed = 150;       // logical px per second
-    public const float Scale = 1.5f;      // how big the truck is drawn
+    public const float Scale = 1.7f;      // how big the truck is drawn
     public const float Length = 40 * Scale;   // body length behind the blade
     public const float HeapMax = 420;
     public static int Runs;               // how many times a plough has been sent (diagnostics)
@@ -1266,20 +1266,206 @@ unsafe static class Render
 
     // MARK: Snowplough
 
-    static readonly float[] pvx = new float[4], pvy = new float[4];
+    static readonly float[] pvx = new float[6], pvy = new float[6];
 
-    /// Axis-aligned rounded box, given in screen pixels
-    static void Box(uint* buf, int bw, int bh, float xa, float xb, float ya, float yb, float round,
-                    float cr, float cg, float cb)
+    /// Rounded box with a vertical gradient, given in screen pixels
+    static void GradBox(uint* buf, int bw, int bh, float xa, float xb, float ya, float yb, float round,
+                        float r0, float g0, float b0, float r1, float g1, float b1, float alpha)
     {
         float lo = MathF.Min(xa, xb), hi = MathF.Max(xa, xb);
         float top = MathF.Min(ya, yb), bot = MathF.Max(ya, yb);
         float r = MathF.Max(0, MathF.Min(round, MathF.Min((hi - lo) * 0.5f, (bot - top) * 0.5f)));
-        pvx[0] = lo + r; pvy[0] = top + r;
-        pvx[1] = hi - r; pvy[1] = top + r;
-        pvx[2] = hi - r; pvy[2] = bot - r;
-        pvx[3] = lo + r; pvy[3] = bot - r;
-        FillPoly(buf, bw, bh, pvx, pvy, 4, r, cr, cg, cb, 1);
+        float ix0 = lo + r, ix1 = hi - r, iy0 = top + r, iy1 = bot - r;
+        float inv = 1f / MathF.Max(1e-3f, bot - top);
+        int x0 = Math.Max(0, (int)MathF.Floor(lo - 1)), x1 = Math.Min(bw - 1, (int)MathF.Ceiling(hi + 1));
+        int y0 = Math.Max(0, (int)MathF.Floor(top - 1)), y1 = Math.Min(bh - 1, (int)MathF.Ceiling(bot + 1));
+        for (int y = y0; y <= y1; y++)
+        {
+            uint* row = buf + (long)y * bw;
+            float py = y + 0.5f;
+            float ddy = MathF.Max(iy0 - py, py - iy1);
+            float t = Math.Clamp((py - top) * inv, 0, 1);
+            float cr = r0 + (r1 - r0) * t, cg = g0 + (g1 - g0) * t, cb = b0 + (b1 - b0) * t;
+            for (int x = x0; x <= x1; x++)
+            {
+                float px = x + 0.5f;
+                float ddx = MathF.Max(ix0 - px, px - ix1);
+                // signed distance to the inset rectangle, so pixels well inside stay fully covered
+                float dd = ddx > 0 || ddy > 0
+                    ? MathF.Sqrt(MathF.Max(ddx, 0) * MathF.Max(ddx, 0) + MathF.Max(ddy, 0) * MathF.Max(ddy, 0))
+                    : MathF.Max(ddx, ddy);
+                float cov = Math.Clamp(r - dd + 0.5f, 0, 1);
+                if (cov > 0) Blend(row + x, cov * alpha, cr, cg, cb);
+            }
+        }
+    }
+
+    /// Convex polygon with a vertical gradient. `round` dilates the outline, so drawing the same
+    /// vertices twice — once with round + outline in a dark colour, once with round — gives a clean edge.
+    static void GradPoly(uint* buf, int bw, int bh, float[] vx, float[] vy, int n, float round,
+                         float r0, float g0, float b0, float r1, float g1, float b1, float alpha)
+    {
+        float minX = float.MaxValue, maxX = float.MinValue, minY = float.MaxValue, maxY = float.MinValue;
+        float area = 0;
+        for (int i = 0; i < n; i++)
+        {
+            minX = MathF.Min(minX, vx[i]); maxX = MathF.Max(maxX, vx[i]);
+            minY = MathF.Min(minY, vy[i]); maxY = MathF.Max(maxY, vy[i]);
+            int j = (i + 1) % n;
+            area += vx[i] * vy[j] - vx[j] * vy[i];
+        }
+        float sign = area >= 0 ? 1 : -1;
+        float inv = 1f / MathF.Max(1e-3f, maxY - minY + 2 * round);
+        int x0 = Math.Max(0, (int)MathF.Floor(minX - round - 1)), x1 = Math.Min(bw - 1, (int)MathF.Ceiling(maxX + round + 1));
+        int y0 = Math.Max(0, (int)MathF.Floor(minY - round - 1)), y1 = Math.Min(bh - 1, (int)MathF.Ceiling(maxY + round + 1));
+        for (int y = y0; y <= y1; y++)
+        {
+            uint* row = buf + (long)y * bw;
+            float py = y + 0.5f;
+            float t = Math.Clamp((py - minY + round) * inv, 0, 1);
+            float cr = r0 + (r1 - r0) * t, cg = g0 + (g1 - g0) * t, cb = b0 + (b1 - b0) * t;
+            for (int x = x0; x <= x1; x++)
+            {
+                float px = x + 0.5f;
+                float dd = float.MinValue;
+                for (int i = 0; i < n; i++)
+                {
+                    int j = (i + 1) % n;
+                    float ex = vx[j] - vx[i], ey = vy[j] - vy[i];
+                    float len = MathF.Max(1e-5f, MathF.Sqrt(ex * ex + ey * ey));
+                    float nx = sign * ey / len, ny = -sign * ex / len;
+                    dd = MathF.Max(dd, (px - vx[i]) * nx + (py - vy[i]) * ny);
+                }
+                float cov = Math.Clamp(round - dd + 0.5f, 0, 1);
+                if (cov > 0) Blend(row + x, cov * alpha, cr, cg, cb);
+            }
+        }
+    }
+
+    /// A body panel: dark outline first, then the gradient fill on top of it
+    static void Panel(uint* buf, int bw, int bh, float xa, float xb, float ya, float yb, float round, float outline,
+                      float r0, float g0, float b0, float r1, float g1, float b1)
+    {
+        float lo = MathF.Min(xa, xb), hi = MathF.Max(xa, xb);
+        float top = MathF.Min(ya, yb), bot = MathF.Max(ya, yb);
+        if (outline > 0)
+            GradBox(buf, bw, bh, lo - outline, hi + outline, top - outline, bot + outline, round + outline,
+                    0.13f, 0.10f, 0.08f, 0.13f, 0.10f, 0.08f, 0.85f);
+        GradBox(buf, bw, bh, lo, hi, top, bot, round, r0, g0, b0, r1, g1, b1, 1);
+    }
+
+    // How far forward the face of the blade moves per unit of height, at its steepest. The heap is
+    // clipped to this line so it never shows a white wall sticking out from behind the board; taking
+    // the steepest part of the curve keeps the snow tucked in rather than leaving a gap.
+    const float BladeLean = 0.12f;
+
+    /// Soft radial glow — beacon light, headlight halo, exhaust puffs. A flat translucent circle
+    /// would show up as a hard-edged grey disc against the desktop, which is what this avoids.
+    static void Glow(uint* buf, int bw, int bh, float cx, float cy, float r, float cr, float cg, float cb, float a)
+    {
+        if (r <= 0 || a <= 0) return;
+        int x0 = Math.Max(0, (int)MathF.Floor(cx - r)), x1 = Math.Min(bw - 1, (int)MathF.Ceiling(cx + r));
+        int y0 = Math.Max(0, (int)MathF.Floor(cy - r)), y1 = Math.Min(bh - 1, (int)MathF.Ceiling(cy + r));
+        float inv = 1f / r;
+        for (int y = y0; y <= y1; y++)
+        {
+            uint* row = buf + (long)y * bw;
+            float dy = (y + 0.5f - cy) * inv;
+            for (int x = x0; x <= x1; x++)
+            {
+                float dx = (x + 0.5f - cx) * inv;
+                float t = 1 - MathF.Sqrt(dx * dx + dy * dy);
+                if (t <= 0) continue;
+                Blend(row + x, a * t * t, cr, cg, cb);
+            }
+        }
+    }
+
+    static float Bump(float u, float c, float w, float a)
+    {
+        float t = MathF.Abs(u - c);
+        return t >= w ? 0 : a * 0.5f * (1 + MathF.Cos(MathF.PI * t / w));
+    }
+
+    // Specks scattered through the shoved heap, in (along, up, size) heap-local coordinates, so the
+    // heap is made of the same grainy snow as the snowballs rather than being a flat white wedge.
+    static readonly float[] heapSpecks =
+    {
+        0.06f, 0.62f, 0.055f,  0.11f, 0.25f, 0.040f,  0.19f, 0.70f, 0.048f,
+        0.24f, 0.38f, 0.034f,  0.33f, 0.60f, 0.044f,  0.39f, 0.20f, 0.030f,
+        0.47f, 0.52f, 0.038f,  0.56f, 0.30f, 0.028f,  0.63f, 0.58f, 0.032f,
+        0.74f, 0.35f, 0.026f,  0.83f, 0.45f, 0.022f,
+    };
+
+    /// The heap being shoved along in front of the blade: a lumpy mound, lit from the top-left and
+    /// shaded towards the ground, drawn column by column so its base sits flat on the snow line.
+    static void PlowHeap(uint* buf, int bw, int bh, Snowplow p, float gy, float k, float d, float back, float s)
+    {
+        float hh = MathF.Min(18, MathF.Sqrt(p.Heap) * 0.95f) * k;
+        if (hh < 1.5f) return;
+        float hw = hh * 2.6f;
+
+        float Height(float u)
+        {
+            if (u <= 0 || u >= 1) return 0;
+            float h = hh * MathF.Pow(1 - u, 1.35f);
+            h += Bump(u, 0.17f, 0.16f, 0.15f * hh);
+            h += Bump(u, 0.45f, 0.15f, 0.10f * hh);
+            h += Bump(u, 0.72f, 0.13f, 0.06f * hh);
+            // The board leans forward, so close to it the snow can only be as tall as the board face
+            // is at that point. Without this the heap shows a white wall standing behind the blade.
+            return MathF.Min(h, u * hw / BladeLean);
+        }
+
+        int pxa = Math.Max(0, (int)MathF.Floor(MathF.Min(back, back + d * hw)) - 1);
+        int pxb = Math.Min(bw - 1, (int)MathF.Ceiling(MathF.Max(back, back + d * hw)) + 1);
+        float du = 1f / MathF.Max(1f, hw);
+        float shEnd = gy + 1.5f * s;
+        for (int px = pxa; px <= pxb; px++)
+        {
+            float u = (px + 0.5f - back) * d * du;
+            if (u < 0 || u > 1) continue;
+            float h = Height(u);
+            if (h < 0.4f) continue;
+
+            // surface slope in screen pixels, so the face turned away from the light goes grey
+            float slope = -d * (Height(Math.Clamp(u + du, 0, 1)) - Height(Math.Clamp(u - du, 0, 1))) * 0.5f;
+            float lum = (0.83f - 0.55f * slope) / MathF.Sqrt(slope * slope + 1);
+            float shade = Math.Clamp(0.60f + 0.48f * lum, 0.60f, 1f);
+
+            float top = gy - h;
+            int yTop = (int)MathF.Floor(top);
+            float invH = 1f / MathF.Max(1f, h);
+            for (int y = Math.Max(0, yTop); y < Math.Min(bh, (int)MathF.Ceiling(gy)); y++)
+            {
+                float v = Math.Clamp((y + 0.5f - top) * invH, 0, 1);
+                float t = v * v * 0.9f;
+                float cov = y == yTop ? MathF.Min(1, 1 - (top - yTop)) : 1;
+                Blend(buf + (long)y * bw + px, 0.97f * cov,
+                      (1 - 0.30f * t) * shade, (1 - 0.22f * t) * shade, (1 - 0.09f * t) * shade);
+            }
+            for (int y = Math.Max(0, (int)MathF.Floor(gy)); y < Math.Min(bh, (int)MathF.Ceiling(shEnd)); y++)
+                Blend(buf + (long)y * bw + px, 0.85f * MathF.Min(1, shEnd - y), 0.70f, 0.78f, 0.92f);
+        }
+
+        for (int i = 0; i < heapSpecks.Length; i += 3)
+        {
+            float u = heapSpecks[i], v = heapSpecks[i + 1];
+            float h = Height(u);
+            if (h < 3) continue;
+            FillCircle(buf, bw, bh, back + d * u * hw, gy - h * v,
+                       MathF.Max(0.7f, heapSpecks[i + 2] * hh), 0.70f, 0.76f, 0.90f, 0.5f);
+        }
+
+        // a couple of clods that have tumbled off the front of the heap
+        for (int i = 0; i < 2; i++)
+        {
+            float r = hh * (i == 0 ? 0.10f : 0.07f);
+            if (r < 1.1f) continue;
+            float cx = back + d * hw * (i == 0 ? 1.07f : 1.19f), cy = gy - r * 0.9f;
+            FillCircle(buf, bw, bh, cx, cy, r, 0.99f, 0.99f, 1f, 0.97f);
+            FillCircle(buf, bw, bh, cx + r * 0.3f, cy + r * 0.28f, r * 0.6f, 0.80f, 0.85f, 0.94f, 0.55f);
+        }
     }
 
     public static void PlowTruck(uint* buf, int bw, int bh, Snowplow p, float groundTop, float s)
@@ -1287,48 +1473,144 @@ unsafe static class Render
         float d = p.Dir, gy = groundTop * s, k = Snowplow.Scale * s;
         float SX(float lx) => p.X * s + d * lx * k;   // local x: 0 is the blade tip, negative is behind
         float SY(float ly) => gy + ly * k;            // local y: 0 is the ground, negative is up
+        float o = MathF.Max(0.75f, 0.55f * k);        // outline thickness
 
-        // the heap of snow being shoved along in front of the blade
-        if (p.Heap > 1)
+        PlowHeap(buf, bw, bh, p, gy, k, d, SX(-5.8f), s);
+
+        // soft shadow on the ground under the truck
+        GradBox(buf, bw, bh, SX(-42), SX(-5), SY(-1.4f), SY(1.6f), 1.5f * k, 0.04f, 0.05f, 0.10f, 0.04f, 0.05f, 0.10f, 0.20f);
+        GradBox(buf, bw, bh, SX(-37), SX(-9), SY(-2.6f), SY(1.2f), 1.8f * k, 0.04f, 0.05f, 0.10f, 0.04f, 0.05f, 0.10f, 0.16f);
+
+        // exhaust: the puffs climb and fade as the truck rolls
+        float clock = MathF.Abs(p.Wheel);
+        for (int i = 0; i < 3; i++)
         {
-            float hh = MathF.Min(20, MathF.Sqrt(p.Heap) * 0.95f);
-            float hw = hh * 2.3f;
-            pvx[0] = SX(-1); pvy[0] = SY(-hh);
-            pvx[1] = SX(hw); pvy[1] = SY(-1.5f);
-            pvx[2] = SX(hw); pvy[2] = SY(0);
-            pvx[3] = SX(-1); pvy[3] = SY(0);
-            FillPoly(buf, bw, bh, pvx, pvy, 4, 2.2f * k, 0.98f, 0.99f, 1f, 0.97f);
+            float ph = (clock * 0.09f + i * 0.3333f) % 1f;
+            Glow(buf, bw, bh, SX(-37.5f - 7.5f * ph), SY(-37f - 13f * ph),
+                 (2.4f + 4.6f * ph) * k, 0.80f, 0.82f, 0.86f, 0.42f * (1 - ph));
         }
 
         // wheels
         for (int i = 0; i < 2; i++)
         {
-            float wx = SX(i == 0 ? -32 : -13), wy = SY(-6), wr = 5.6f * k;
+            float wx = SX(i == 0 ? -33 : -13), wy = SY(-6.6f), wr = 6.4f * k;
+            FillCircle(buf, bw, bh, wx, wy, wr + o, 0.09f, 0.08f, 0.09f, 0.9f);
             FillCircle(buf, bw, bh, wx, wy, wr, 0.13f, 0.14f, 0.16f, 1);
-            FillCircle(buf, bw, bh, wx, wy, wr * 0.45f, 0.55f, 0.57f, 0.62f, 1);
-            for (int t = 0; t < 3; t++)   // spokes, so you can see it roll
+            for (int t = 0; t < 7; t++)   // tread blocks, so you can see it roll
             {
-                float a = p.Wheel + t * 2.0944f;
-                FillSegment(buf, bw, bh, wx, wy, wx + MathF.Cos(a) * wr * 0.8f, wy + MathF.Sin(a) * wr * 0.8f,
-                            MathF.Max(0.6f, 0.9f * k), 0.42f, 0.44f, 0.48f, 1);
+                float a = p.Wheel + t * 0.8976f;
+                FillCircle(buf, bw, bh, wx + MathF.Cos(a) * wr * 0.88f, wy + MathF.Sin(a) * wr * 0.88f,
+                           0.85f * k, 0.28f, 0.29f, 0.33f, 1);
+            }
+            FillCircle(buf, bw, bh, wx, wy, wr * 0.46f, 0.60f, 0.62f, 0.67f, 1);
+            FillCircle(buf, bw, bh, wx - wr * 0.11f, wy - wr * 0.13f, wr * 0.33f, 0.80f, 0.82f, 0.86f, 1);
+            for (int t = 0; t < 4; t++)   // hub bolts
+            {
+                float a = p.Wheel + t * 1.5708f;
+                FillCircle(buf, bw, bh, wx + MathF.Cos(a) * wr * 0.28f, wy + MathF.Sin(a) * wr * 0.28f,
+                           MathF.Max(0.5f, 0.5f * k), 0.42f, 0.44f, 0.48f, 1);
             }
         }
 
-        // body, cab and window
-        Box(buf, bw, bh, SX(-41), SX(-7), SY(-20), SY(-6), 2.5f * k, 0.95f, 0.55f, 0.10f);
-        Box(buf, bw, bh, SX(-31), SX(-15), SY(-31), SY(-19), 2.5f * k, 0.93f, 0.50f, 0.09f);
-        Box(buf, bw, bh, SX(-29), SX(-17), SY(-29), SY(-23), 1.4f * k, 0.35f, 0.47f, 0.58f);
+        // chassis under the body, reaching forward to carry the blade
+        Panel(buf, bw, bh, SX(-38), SX(-6), SY(-10.5f), SY(-6.2f), 1.2f * k, 0, 0.24f, 0.25f, 0.28f, 0.13f, 0.14f, 0.16f);
 
-        // amber beacon on the roof
-        FillCircle(buf, bw, bh, SX(-23), SY(-33), 2.6f * k, 1f, 0.72f, 0.15f, 1);
-        FillCircle(buf, bw, bh, SX(-23), SY(-33), 5.5f * k, 1f, 0.72f, 0.15f, 0.22f);
+        // push frame out to the blade: a beam, a diagonal strut and the post the board hangs on
+        FillSegment(buf, bw, bh, SX(-13.5f), SY(-11.5f), SX(-7.6f), SY(-15.5f), 0.9f * k, 0.22f, 0.23f, 0.26f, 1);
+        GradBox(buf, bw, bh, SX(-14), SX(-6.8f), SY(-11.6f), SY(-8.8f), 0.5f * k, 0.30f, 0.31f, 0.34f, 0.18f, 0.19f, 0.22f, 1);
+        GradBox(buf, bw, bh, SX(-8.2f), SX(-6.6f), SY(-17.5f), SY(-3.5f), 0.5f * k, 0.30f, 0.31f, 0.34f, 0.18f, 0.19f, 0.22f, 1);
 
-        // the blade: a steel plate raked forward
-        pvx[0] = SX(-7); pvy[0] = SY(-3);
-        pvx[1] = SX(-2); pvy[1] = SY(-23);
-        pvx[2] = SX(3); pvy[2] = SY(-21.5f);
-        pvx[3] = SX(-1.5f); pvy[3] = SY(0);
-        FillPoly(buf, bw, bh, pvx, pvy, 4, 1.2f * k, 0.74f, 0.78f, 0.84f, 1);
+        // body, lit along the top and deepening towards the chassis
+        Panel(buf, bw, bh, SX(-43), SX(-9.5f), SY(-22), SY(-7.5f), 2.6f * k, o, 1f, 0.66f, 0.16f, 0.74f, 0.34f, 0.03f);
+        GradBox(buf, bw, bh, SX(-41.5f), SX(-11), SY(-15.5f), SY(-13.5f), 1f * k,
+                0.42f, 0.22f, 0.05f, 0.42f, 0.22f, 0.05f, 0.5f);                       // rubbing strip
+        for (int i = 0; i < 4; i++)                                                    // ribs on the tipper body
+            GradBox(buf, bw, bh, SX(-39f + 7.3f * i), SX(-37.6f + 7.3f * i), SY(-21.2f), SY(-8.4f), 0.6f * k,
+                    0.52f, 0.27f, 0.05f, 0.52f, 0.27f, 0.05f, 0.35f);
+        GradBox(buf, bw, bh, SX(-42), SX(-10.5f), SY(-23.6f), SY(-21.6f), 1f * k,
+                1f, 1f, 1f, 0.86f, 0.90f, 0.96f, 0.95f);                               // snow caught on the body
+
+        // cab: a boxy shell with the windscreen raked back
+        pvx[0] = SX(-32.8f); pvy[0] = SY(-23.2f);
+        pvx[1] = SX(-32.8f); pvy[1] = SY(-31.8f);
+        pvx[2] = SX(-23.0f); pvy[2] = SY(-31.8f);
+        pvx[3] = SX(-19.2f); pvy[3] = SY(-26.6f);
+        pvx[4] = SX(-19.2f); pvy[4] = SY(-23.2f);
+        GradPoly(buf, bw, bh, pvx, pvy, 5, 2.2f * k + o, 0.13f, 0.10f, 0.08f, 0.13f, 0.10f, 0.08f, 0.85f);
+        GradPoly(buf, bw, bh, pvx, pvy, 5, 2.2f * k, 1f, 0.68f, 0.18f, 0.80f, 0.40f, 0.05f, 1);
+
+        // windscreen and side glass, with a slanted highlight across it
+        pvx[0] = SX(-31.3f); pvy[0] = SY(-30.6f);
+        pvx[1] = SX(-24.3f); pvy[1] = SY(-30.6f);
+        pvx[2] = SX(-21.0f); pvy[2] = SY(-27.4f);
+        pvx[3] = SX(-31.3f); pvy[3] = SY(-27.4f);
+        GradPoly(buf, bw, bh, pvx, pvy, 4, 1.1f * k, 0.44f, 0.60f, 0.73f, 0.20f, 0.31f, 0.43f, 1);
+        pvx[0] = SX(-29.5f); pvy[0] = SY(-30.4f);
+        pvx[1] = SX(-27.6f); pvy[1] = SY(-30.4f);
+        pvx[2] = SX(-23.2f); pvy[2] = SY(-26.6f);
+        pvx[3] = SX(-25.1f); pvy[3] = SY(-26.6f);
+        GradPoly(buf, bw, bh, pvx, pvy, 4, 0.4f * k, 1f, 1f, 1f, 1f, 1f, 1f, 0.22f);
+
+        // visor over the screen, snow on the roof, and the wing mirror
+        GradBox(buf, bw, bh, SX(-33.4f), SX(-20.6f), SY(-34.4f), SY(-32.9f), 0.7f * k,
+                0.62f, 0.30f, 0.05f, 0.50f, 0.23f, 0.03f, 1);
+        GradBox(buf, bw, bh, SX(-33.6f), SX(-21.8f), SY(-35.3f), SY(-33.7f), 0.8f * k,
+                1f, 1f, 1f, 0.84f, 0.89f, 0.96f, 0.95f);
+        FillSegment(buf, bw, bh, SX(-19.6f), SY(-29.6f), SX(-17.4f), SY(-30.4f), MathF.Max(0.5f, 0.4f * k),
+                    0.18f, 0.16f, 0.15f, 1);
+        GradBox(buf, bw, bh, SX(-17.9f), SX(-16.3f), SY(-32.2f), SY(-29.4f), 0.5f * k,
+                0.26f, 0.26f, 0.28f, 0.16f, 0.16f, 0.18f, 1);
+
+        // exhaust stack behind the cab
+        Panel(buf, bw, bh, SX(-37.2f), SX(-34.8f), SY(-36.5f), SY(-22f), 1f * k, 0, 0.46f, 0.47f, 0.50f, 0.24f, 0.25f, 0.28f);
+        FillCircle(buf, bw, bh, SX(-36f), SY(-36.6f), 1.7f * k, 0.16f, 0.17f, 0.19f, 1);
+
+        // amber beacon, pulsing
+        GradBox(buf, bw, bh, SX(-30.2f), SX(-27.3f), SY(-37.4f), SY(-35.6f), 0.6f * k,
+                0.20f, 0.19f, 0.20f, 0.14f, 0.13f, 0.14f, 1);
+        float pulse = 0.34f + 0.3f * (0.5f + 0.5f * MathF.Sin(clock * 1.7f));
+        Glow(buf, bw, bh, SX(-28.75f), SY(-38.3f), 8f * k, 1f, 0.72f, 0.15f, pulse);
+        FillCircle(buf, bw, bh, SX(-28.75f), SY(-38.3f), 2.5f * k, 1f, 0.74f, 0.18f, 1);
+        FillCircle(buf, bw, bh, SX(-29.3f), SY(-38.9f), 1f * k, 1f, 0.94f, 0.72f, 1);
+
+        // headlight
+        FillCircle(buf, bw, bh, SX(-11.2f), SY(-19.8f), 2.5f * k, 0.14f, 0.11f, 0.08f, 0.9f);
+        FillCircle(buf, bw, bh, SX(-11.2f), SY(-19.8f), 1.8f * k, 1f, 0.95f, 0.72f, 1);
+        Glow(buf, bw, bh, SX(-11.2f), SY(-19.8f), 6f * k, 1f, 0.92f, 0.60f, 0.40f);
+
+        // The board, as three plates curling further forward the higher they go. All three outlines
+        // go down first and the fills on top of them, or the shared edges would show as dark seams.
+        // Back and front of the plate at each height, bottom to top:
+        float[] bx = { -8.0f, -7.0f, -4.8f, -1.0f }, by = { -0.5f, -9.0f, -16.6f, -21.8f };
+        float[] fx = { -5.8f, -4.8f, -2.6f, 1.2f }, fy = { -1.0f, -9.6f, -17.3f, -22.6f };
+        for (int pass = 0; pass < 2; pass++)
+            for (int i = 0; i < 3; i++)
+            {
+                pvx[0] = SX(bx[i]); pvy[0] = SY(by[i]);
+                pvx[1] = SX(bx[i + 1]); pvy[1] = SY(by[i + 1]);
+                pvx[2] = SX(fx[i + 1]); pvy[2] = SY(fy[i + 1]);
+                pvx[3] = SX(fx[i]); pvy[3] = SY(fy[i]);
+                if (pass == 0)
+                    GradPoly(buf, bw, bh, pvx, pvy, 4, 0.9f * k + o, 0.14f, 0.15f, 0.17f, 0.14f, 0.15f, 0.17f, 0.9f);
+                else
+                {
+                    // each plate a little brighter than the one below, so the curve reads
+                    float t = i / 2f;
+                    GradPoly(buf, bw, bh, pvx, pvy, 4, 0.9f * k,
+                             0.72f + 0.23f * t, 0.76f + 0.21f * t, 0.84f + 0.15f * t,
+                             0.52f + 0.22f * t, 0.56f + 0.21f * t, 0.64f + 0.19f * t, 1);
+                }
+            }
+        FillSegment(buf, bw, bh, SX(-0.6f), SY(-21.9f), SX(0.9f), SY(-22.4f), 0.8f * k, 1f, 1f, 1f, 0.85f);
+        FillSegment(buf, bw, bh, SX(-7.8f), SY(-0.6f), SX(-6.0f), SY(-0.9f), 0.8f * k, 0.28f, 0.30f, 0.34f, 1);
+
+        // snow spraying over the top lip
+        for (int i = 0; i < 3; i++)
+        {
+            float a = clock * 0.7f + i * 2.1f;
+            FillCircle(buf, bw, bh, SX(-0.5f + 2.6f * i), SY(-23.6f - 1.6f * i + MathF.Sin(a) * 1.4f),
+                       MathF.Max(0.7f, (1.5f - 0.25f * i) * k), 1f, 1f, 1f, 0.55f - 0.12f * i);
+        }
     }
 
     static readonly List<Snowball> drawList = new();
