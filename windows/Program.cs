@@ -49,8 +49,8 @@ static class Cfg
     public static float Wind = 0;
     public const float WindMax = 160;              // logical px per second at full strength
 
-    // Fairy lights, hung just under the top edge of every window.
-    public static bool Lights = true;
+    // Fairy lights, hung just under the top edge of every window. Off unless you ask for them.
+    public static bool Lights = false;
     public const float LightSpacing = 22;          // distance between bulbs
     public const float LightSpan = 120;            // distance between the points the wire is hooked at
     public const float LightSag = 9;               // how far the wire droops between hooks

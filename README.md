@@ -69,7 +69,7 @@ A note on **maximised windows**, which are far more common on Windows than on a 
 
 **Wind** 🌬️ — the snow always drifts in gentle gusts, and the ❄ menu has a *Wind* submenu if you want a steady breeze or a proper gale behind it, from either side. The stronger you set it, the rougher the gusts get, and it tugs at the fairy lights too.
 
-**Fairy lights** ✨ — now on Windows as well, and on from the start: a string of bulbs hangs itself just under the top edge of every window, drooping between its hooks, lighting up left to right, twinkling out of step with each other and swinging in the wind. They follow the windows you move, and tuck away behind anything in front. The ❄ menu switches them off again.
+**Fairy lights** ✨ — now on Windows as well. Switch them on from the ❄ menu and a string of bulbs hangs itself just under the top edge of every window, drooping between its hooks, lighting up left to right, twinkling out of step with each other and swinging in the wind. They follow the windows you move, and tuck away behind anything in front. They stay off until you ask for them.
 
 ## Make it yours 🎨
 
