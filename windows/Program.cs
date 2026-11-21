@@ -216,6 +216,7 @@ sealed class SnowWorld
     public List<Win> Order = new();              // windows from front to back
     public Pile Ground;
     public bool GroundIsTaskbar;
+    public int TaskbarZ;             // windows before this index in Order are drawn in front of the taskbar
     float pollAcc, t;
     const long GroundId = -2;
 
@@ -349,13 +350,15 @@ sealed class SnowWorld
 
     // MARK: Per-frame update
 
-    public void Update(float dt, Func<List<Win>> readWindows, Func<float?> readTaskbarTop, float mx, float my)
+    public void Update(float dt, Func<List<Win>> readWindows, Func<float?> readTaskbarTop, Func<int> readTaskbarZ,
+                       float mx, float my)
     {
         t += dt;
         pollAcc += dt;
         if (pollAcc >= Cfg.PollInterval)
         {
-            PollWindows(pollAcc, readWindows(), readTaskbarTop());
+            // argument order matters: readWindows() is what works out where the taskbar sits in the z-order
+            PollWindows(pollAcc, readWindows(), readTaskbarTop(), readTaskbarZ());
             pollAcc = 0;
         }
         StepFlakes(dt);
@@ -433,8 +436,9 @@ sealed class SnowWorld
             Plow = null;
     }
 
-    void PollWindows(float dt, List<Win> wins, float? taskbarTop)
+    void PollWindows(float dt, List<Win> wins, float? taskbarTop, int taskbarZ)
     {
+        TaskbarZ = taskbarZ;
         // Taskbar at the bottom: the snow on the "ground" sits on top of it
         float groundTop = taskbarTop ?? H;
         bool taskbar = taskbarTop.HasValue;
@@ -508,14 +512,21 @@ sealed class SnowWorld
                 if (o != p.Occ[c]) { p.Occ[c] = o; if (o) p.H[c] = 0; p.Dirty = true; }
             }
         }
-        // The taskbar is always in front of windows; the plain screen bottom is not
+        // Snow lying on the plain bottom of the screen is hidden by any window over it. Snow lying on
+        // the taskbar is hidden only by a window that is drawn in front of the taskbar AND actually
+        // hangs down over it — a maximised window stops exactly at the taskbar's top edge, and must
+        // not blank the whole line just because the snow sticks up into its last few rows.
+        float gy = Ground.TopY - 1;
+        int limit = GroundIsTaskbar ? Math.Min(TaskbarZ, Order.Count) : Order.Count;
         for (int c = 0; c < Ground.Count; c++)
         {
             bool o = false;
-            if (!GroundIsTaskbar)
+            float x = Ground.ColX(c);
+            for (int j = 0; j < limit; j++)
             {
-                float x = Ground.ColX(c), y = Ground.TopY - 1;
-                foreach (var w in Order) if (w.Contains(x, y)) { o = true; break; }
+                var w = Order[j];
+                if (GroundIsTaskbar && w.B <= Ground.TopY + 1) continue;
+                if (w.Contains(x, gy)) { o = true; break; }
             }
             if (o != Ground.Occ[c]) { Ground.Occ[c] = o; if (o) Ground.H[c] = 0; Ground.Dirty = true; }
         }
@@ -1494,6 +1505,7 @@ static unsafe class Program
     static bool paused;
     static bool clickThrough = true;          // WS_EX_TRANSPARENT currently set?
     static readonly List<Win> found = new();
+    static int taskbarZ;                      // how many accepted windows are drawn in front of the taskbar
     static readonly StringBuilder clsName = new(64);
 
     [STAThread]
@@ -1622,7 +1634,7 @@ static unsafe class Program
         GetCursorPos(out POINT mp);
         float mx = mp.X / scale, my = mp.Y / scale;
 
-        world.Update(dt, ReadWindows, ReadTaskbarTop, mx, my);
+        world.Update(dt, ReadWindows, ReadTaskbarTop, ReadTaskbarZ, mx, my);
         SetClickThrough(!world.WantsMouse(mx, my));
         Render.World((uint*)bits, bw, bh, world, scale);
 
@@ -1638,9 +1650,12 @@ static unsafe class Program
     static List<Win> ReadWindows()
     {
         found.Clear();
+        taskbarZ = 0;
         EnumWindows(enumProc, IntPtr.Zero);       // top-level windows, front to back
         return new List<Win>(found);
     }
+
+    static int ReadTaskbarZ() => taskbarZ;
 
     static bool EnumProc(IntPtr h, IntPtr _)
     {
@@ -1654,7 +1669,14 @@ static unsafe class Program
         clsName.Clear();
         GetClassNameW(h, clsName, clsName.Capacity);
         string cls = clsName.ToString();
-        if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") return true;
+        if (cls == "Shell_TrayWnd")
+        {
+            // Remember where the taskbar sits in the z-order: everything found before it is drawn
+            // in front of it, and only those windows can hide the snow lying on it.
+            taskbarZ = found.Count;
+            return true;
+        }
+        if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_SecondaryTrayWnd") return true;
 
         // The visible frame (GetWindowRect includes invisible resize borders on Windows 10/11)
         if (DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, out RECT rc, Marshal.SizeOf<RECT>()) != 0)
