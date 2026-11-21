@@ -2052,7 +2052,8 @@ static unsafe class Program
     const uint MF_STRING = 0, MF_CHECKED = 8, MF_POPUP = 0x10, MF_SEPARATOR = 0x800;
     const uint TPM_RIGHTBUTTON = 0x2, TPM_RETURNCMD = 0x100;
     const int CMD_PAUSE = 1, CMD_CLEAR = 2, CMD_QUIT = 3, CMD_BALLS = 4, CMD_PLOW = 5, CMD_AUTOPLOW = 6,
-              CMD_FAIRY = 7, CMD_LIGHT = 10, CMD_MEDIUM = 11, CMD_HEAVY = 12, CMD_WIND = 20;
+              CMD_FAIRY = 7, CMD_AUTOSTART = 8,
+              CMD_LIGHT = 10, CMD_MEDIUM = 11, CMD_HEAVY = 12, CMD_WIND = 20;
 
     // Wind settings, strongest from the left to strongest from the right
     static readonly (float V, string Label)[] WindSteps =
@@ -2148,6 +2149,16 @@ static unsafe class Program
     [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
     [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
     [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegCreateKeyExW(IntPtr root, string sub, int res, string cls, int opts, int sam, IntPtr sec, out IntPtr key, out int disp);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegSetValueExW(IntPtr key, string name, int res, int type, byte[] data, int cb);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegQueryValueExW(IntPtr key, string name, IntPtr res, out int type, byte[] data, ref int cb);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegDeleteValueW(IntPtr key, string name);
+    [DllImport("advapi32.dll")] static extern int RegCloseKey(IntPtr key);
     [DllImport("gdi32.dll")] static extern IntPtr CreateBitmap(int w, int h, uint planes, uint bpp, IntPtr bits);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out RECT value, int size);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size);
@@ -2194,6 +2205,95 @@ static unsafe class Program
         if (force) topAcc = 0;
     }
     static bool clickThrough = true;          // WS_EX_TRANSPARENT currently set?
+    // MARK: Settings and starting with Windows
+    //
+    // Kept in the registry rather than a file: the app is one self-contained exe with no install
+    // folder to call its own, and the autostart entry has to go in the registry anyway.
+
+    static readonly IntPtr HKCU = new(unchecked((int)0x80000001));
+    const string SettingsKey = @"Software\WinterIsComing";
+    const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    const int KEY_ALL = 0xF003F, REG_SZ = 1, REG_DWORD = 4;
+
+    static IntPtr OpenKey(string path)
+    {
+        if (RegCreateKeyExW(HKCU, path, 0, null, 0, KEY_ALL, IntPtr.Zero, out IntPtr key, out _) != 0)
+            return IntPtr.Zero;
+        return key;
+    }
+
+    static void SetDword(IntPtr key, string name, int value)
+    {
+        if (key != IntPtr.Zero) RegSetValueExW(key, name, 0, REG_DWORD, BitConverter.GetBytes(value), 4);
+    }
+
+    static int GetDword(IntPtr key, string name, int fallback)
+    {
+        if (key == IntPtr.Zero) return fallback;
+        var data = new byte[4];
+        int cb = 4;
+        if (RegQueryValueExW(key, name, IntPtr.Zero, out int type, data, ref cb) != 0 || type != REG_DWORD)
+            return fallback;
+        return BitConverter.ToInt32(data, 0);
+    }
+
+    static string ExePath() => Environment.ProcessPath ?? "";
+
+    static bool AutoStartOn()
+    {
+        IntPtr key = OpenKey(RunKey);
+        if (key == IntPtr.Zero) return false;
+        var data = new byte[1024];
+        int cb = data.Length;
+        bool on = RegQueryValueExW(key, "WinterIsComing", IntPtr.Zero, out int type, data, ref cb) == 0
+                  && type == REG_SZ && cb > 2;
+        RegCloseKey(key);
+        return on;
+    }
+
+    static void SetAutoStart(bool on)
+    {
+        IntPtr key = OpenKey(RunKey);
+        if (key == IntPtr.Zero) return;
+        if (on)
+        {
+            string cmd = "\"" + ExePath() + "\"";
+            var bytes = Encoding.Unicode.GetBytes(cmd + "\0");
+            RegSetValueExW(key, "WinterIsComing", 0, REG_SZ, bytes, bytes.Length);
+        }
+        else RegDeleteValueW(key, "WinterIsComing");
+        RegCloseKey(key);
+    }
+
+    /// Everything the ❄ menu can change, so it is still that way tomorrow. Not whether the snow is
+    /// paused: coming back to a dead desktop looks like the thing is broken.
+    static void SaveSettings()
+    {
+        IntPtr key = OpenKey(SettingsKey);
+        if (key == IntPtr.Zero) return;
+        SetDword(key, "Snow", Cfg.TargetFlakes);
+        SetDword(key, "Wind", (int)MathF.Round(Cfg.Wind * 100));
+        SetDword(key, "Snowballs", Cfg.Snowballs ? 1 : 0);
+        SetDword(key, "Lights", Cfg.Lights ? 1 : 0);
+        SetDword(key, "AutoPlough", world != null && world.AutoPlow ? 1 : 0);
+        RegCloseKey(key);
+    }
+
+    static bool loadedAutoPlough = true;
+
+    static void LoadSettings()
+    {
+        IntPtr key = OpenKey(SettingsKey);
+        if (key == IntPtr.Zero) return;
+        int snow = GetDword(key, "Snow", Cfg.TargetFlakes);
+        if (snow == 120 || snow == 260 || snow == 500) Cfg.TargetFlakes = snow;
+        Cfg.Wind = Math.Clamp(GetDword(key, "Wind", 0) / 100f, -1f, 1f);
+        Cfg.Snowballs = GetDword(key, "Snowballs", Cfg.Snowballs ? 1 : 0) != 0;
+        Cfg.Lights = GetDword(key, "Lights", Cfg.Lights ? 1 : 0) != 0;
+        loadedAutoPlough = GetDword(key, "AutoPlough", 1) != 0;
+        RegCloseKey(key);
+    }
+
     static string diagPath;
     static double lastDiag;
     const int ShotRows = 90;         // how much of the top of the screen --shots keeps
@@ -2216,6 +2316,11 @@ static unsafe class Program
         // own output, not a picture of the screen — the way to see what it is actually drawing.
         for (int i = 0; i < args.Length - 1; i++)
             if (args[i] == "--shots") shotDir = args[i + 1];
+        // --autostart on|off: the same switch as the tray menu item, for setting it up from a script
+        for (int i = 0; i < args.Length - 1; i++)
+            if (args[i] == "--autostart") SetAutoStart(args[i + 1] == "on");
+
+        LoadSettings();
 
         SetProcessDpiAwarenessContext((IntPtr)(-4));   // per-monitor DPI aware v2: real pixel coordinates
         IntPtr inst = GetModuleHandleW(null);
@@ -2250,6 +2355,8 @@ static unsafe class Program
         screenDC = GetDC(IntPtr.Zero);
         CreateSurface();
         world = new SnowWorld(bw / scale, bh / scale);
+        world.AutoPlow = loadedAutoPlough;
+        SaveSettings();          // writes the defaults back on a first run, so the key is there to look at
 
         ShowWindow(overlay, SW_SHOWNOACTIVATE);
         AddTrayIcon();
@@ -2493,6 +2600,8 @@ static unsafe class Program
                   .Append("  ").Append(pile).Append('\n');
             }
             sb.Append($"piles rebuilt {world.PileChurn}, shaken off by a moving window {world.MoveShakes}\n");
+            sb.Append($"wind {Cfg.Wind:0.0}, lights {(Cfg.Lights ? "on" : "off")}, snowballs {(Cfg.Snowballs ? "on" : "off")}, ")
+              .Append($"start with Windows {(AutoStartOn() ? "yes" : "no")}\n");
             sb.Append($"snow {(paused ? "PAUSED" : "running")}, {world.Flakes.Count} flakes in the air, ")
               .Append(overlayZ == 0
                       ? "overlay is in front of every window\n"
@@ -2621,6 +2730,8 @@ static unsafe class Program
         AppendMenuW(menu, MF_STRING, (UIntPtr)CMD_PLOW, "Send the snowplough");
         AppendMenuW(menu, MF_STRING | (world.AutoPlow ? MF_CHECKED : 0), (UIntPtr)CMD_AUTOPLOW, "Snowplough comes by itself");
         AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, null);
+        AppendMenuW(menu, MF_STRING | (AutoStartOn() ? MF_CHECKED : 0), (UIntPtr)CMD_AUTOSTART, "Start with Windows");
+        AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, null);
         AppendMenuW(menu, MF_STRING, (UIntPtr)CMD_CLEAR, "Clear snow");
         AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, null);
         AppendMenuW(menu, MF_STRING, (UIntPtr)CMD_QUIT, "Quit");
@@ -2641,6 +2752,7 @@ static unsafe class Program
             case CMD_PLOW: world.SendPlow(); break;
             case CMD_AUTOPLOW: world.AutoPlow = !world.AutoPlow; break;
             case CMD_FAIRY: Cfg.Lights = !Cfg.Lights; break;
+            case CMD_AUTOSTART: SetAutoStart(!AutoStartOn()); break;
             case CMD_LIGHT: Cfg.TargetFlakes = 120; break;
             case CMD_MEDIUM: Cfg.TargetFlakes = 260; break;
             case CMD_HEAVY: Cfg.TargetFlakes = 500; break;
@@ -2650,6 +2762,7 @@ static unsafe class Program
                 if (cmd >= CMD_WIND && cmd < CMD_WIND + WindSteps.Length) Cfg.Wind = WindSteps[cmd - CMD_WIND].V;
                 break;
         }
+        if (cmd != 0 && cmd != CMD_QUIT) SaveSettings();
     }
 
     static void Quit()

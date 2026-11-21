@@ -59,7 +59,9 @@ cd WINTER_IS_COMING/windows
 dotnet run -c Release
 ```
 
-**Left-click the ❄ icon** near the clock to stop and start the snow, or press **Ctrl+Alt+S** from anywhere. Right-click it for the rest: the snow amount, wind, snowballs, the snowplough, fairy lights, clearing the snow and quitting. If you can't see the ❄, it's under the **^** arrow in the tray — drag it out onto the taskbar and it stays there. You'll need the [.NET 8 SDK](https://dotnet.microsoft.com/download) (`winget install Microsoft.DotNet.SDK.8`).
+**Left-click the ❄ icon** near the clock to stop and start the snow, or press **Ctrl+Alt+S** from anywhere. Right-click it for the rest: the snow amount, wind, snowballs, the snowplough, fairy lights, clearing the snow and quitting. If you can't see the ❄, it's under the **^** arrow in the tray — drag it out onto the taskbar and it stays there.
+
+Whatever you pick there is remembered for next time. Tick **Start with Windows** in the same menu and it comes back on its own after a restart (`WinterIsComing.exe --autostart on` does the same from a script, `off` undoes it). Only the pause isn't remembered — coming back to a dead desktop looks like something is broken. You'll need the [.NET 8 SDK](https://dotnet.microsoft.com/download) (`winget install Microsoft.DotNet.SDK.8`).
 
 It plays much the same way as the Mac version: **slide your mouse sideways over the snow** to roll a ball (no clicking), roll one ball into another to **push** it, **hold the left button** on a ball to carry it, and **stack three** to get a snowman with a carrot nose and a red scarf. A ball pushed off an edge falls and bursts into a heap of snow.
 
