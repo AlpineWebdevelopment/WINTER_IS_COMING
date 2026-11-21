@@ -44,6 +44,7 @@ static class Cfg
     public const float BallMax = 28;               // and stops growing at this size
     public const int MaxBalls = 20;                // oldest resting snowballs are removed beyond this
     public static bool Snowballs = true;           // rolling snowballs and snowmen on / off
+    public const float CornerRadius = 8;           // Windows 11 rounds a window's top corners by about this
     public const float SweepWidth = 14;            // how wide a brush the cursor is on a window's snow line
     public const float SweepBite = 1.1f;           // snow taken per logical px of cursor travel
 
@@ -94,6 +95,7 @@ sealed class Pile
     public float MinX, TopY;          // TopY = the edge the snow sits on
     public readonly float Width, MaxH;
     public readonly float[] H, Caps;  // current height / max height per column
+    public readonly float[] Drop;     // how far below TopY this column rests: the window's rounded corner
     public readonly bool[] Occ;       // column hidden behind a window in front
     public readonly float Seed;       // so two piles never get the same lumps
     public bool Dirty;
@@ -107,16 +109,23 @@ sealed class Pile
          + 0.30f * MathF.Sin(u * 2.13f + seed * 1.7f)
          + 0.15f * MathF.Sin(u * 4.57f + seed * 2.9f);
 
-    public Pile(float minX, float topY, float width, float maxH)
+    public Pile(float minX, float topY, float width, float maxH, float corner = 0)
     {
         MinX = minX; TopY = topY; Width = width; MaxH = maxH;
         int n = Math.Max(1, (int)MathF.Ceiling(width / Cfg.ColW));
-        H = new float[n]; Caps = new float[n]; Occ = new bool[n];
+        H = new float[n]; Caps = new float[n]; Occ = new bool[n]; Drop = new float[n];
         Seed = (seedCounter++ * 0.618f) % 6.283f;
+        float r = MathF.Min(corner, width * 0.5f);
         for (int i = 0; i < n; i++)
         {
             float edgeDist = MathF.Min(i + 0.5f, n - i - 0.5f) * Cfg.ColW;
-            float t = MathF.Min(1, edgeDist / (maxH * 2.2f));
+            // Near the ends the surface curves away down the window's rounded corner, so the snow
+            // there rests lower. Without this the last few columns sit on the straight top edge and
+            // hang out over the corner with nothing under them.
+            Drop[i] = edgeDist >= r ? 0 : r - MathF.Sqrt(MathF.Max(0, r * r - (r - edgeDist) * (r - edgeDist)));
+            // Thin out over roughly the corner itself, not over half the window: a long taper
+            // leaves a thin beak reaching along the edge instead of snow sitting on a corner.
+            float t = MathF.Min(1, edgeDist / MathF.Max(6, maxH * 0.9f));
             // Every column used to fill to exactly maxH, so a pile that had filled up was a dead
             // straight white bar. Giving each column its own ceiling keeps the top gently uneven
             // even when it is full. The wave is slow enough that Relax() does not flatten it out.
@@ -129,7 +138,7 @@ sealed class Pile
     public float Total { get { float s = 0; foreach (var h in H) s += h; return s; } }
     public int Col(float x) { int c = (int)MathF.Floor((x - MinX) / Cfg.ColW); return c >= 0 && c < Count ? c : -1; }
     public float ColX(int c) => MinX + (c + 0.5f) * Cfg.ColW;
-    public float Surface(int c) => TopY - H[c];
+    public float Surface(int c) => TopY + Drop[c] - H[c];
 
     static readonly (int, float)[] Spread = { (0, 1), (-1, .75f), (1, .75f), (-2, .45f), (2, .45f), (-3, .2f), (3, .2f) };
 
@@ -459,7 +468,7 @@ sealed class SnowWorld
                 while (amount > 0)
                 {
                     if (amount < 1 && Rnd.F(0, 1) > amount) break;
-                    SpawnClump(p.ColX(c) + Rnd.F(-1.5f, 1.5f), p.TopY - Rnd.F(0, p.H[c]),
+                    SpawnClump(p.ColX(c) + Rnd.F(-1.5f, 1.5f), p.TopY + p.Drop[c] - Rnd.F(0, p.H[c]),
                                fx + Rnd.F(-40, 40), fy - Rnd.F(10, 80), id);
                     amount -= 1;
                 }
@@ -594,7 +603,7 @@ sealed class SnowWorld
             {
                 PileChurn++;
                 if (pile != null) Release(pile, 0, 0, r.Id);
-                Piles[r.Id] = new Pile(r.L, r.T, r.Width, depth);
+                Piles[r.Id] = new Pile(r.L, r.T, r.Width, depth, Cfg.CornerRadius);
             }
             else if (MathF.Abs(old.Width - r.Width) > 0.5f || MathF.Abs(pile.MaxH - depth) > 0.5f)
             {
@@ -602,7 +611,7 @@ sealed class SnowWorld
                 // snow fits: drop what's there and start a new pile
                 PileChurn++;
                 Release(pile, 0, 0, r.Id);
-                Piles[r.Id] = new Pile(r.L, r.T, r.Width, depth);
+                Piles[r.Id] = new Pile(r.L, r.T, r.Width, depth, Cfg.CornerRadius);
             }
             else if (MathF.Abs(old.L - r.L) > 0.3f || MathF.Abs(old.T - r.T) > 0.3f)
             {
@@ -647,7 +656,7 @@ sealed class SnowWorld
             if (!Piles.TryGetValue(Order[i].Id, out var p)) continue;
             for (int c = 0; c < p.Count; c++)
             {
-                float x = p.ColX(c), y = p.TopY - 1;
+                float x = p.ColX(c), y = p.TopY + p.Drop[c] - 1;
                 bool o = x < 0 || x > W || y < 0;
                 if (!o) for (int j = 0; j < i; j++) if (Order[j].Contains(x, y)) { o = true; break; }
                 if (o != p.Occ[c]) { p.Occ[c] = o; if (o) p.H[c] = 0; p.Dirty = true; }
@@ -776,7 +785,7 @@ sealed class SnowWorld
     {
         int c = p.Col(mx);
         if (c < 0 || p.Occ[c]) return false;
-        return my <= p.TopY + 6 && my >= p.TopY - p.H[c] - 14;
+        return my <= p.TopY + p.Drop[c] + 6 && my >= p.TopY + p.Drop[c] - p.H[c] - 14;
     }
 
     /// Which snow surface is the mouse hovering over? Taskbar first, then windows front to back, then the ground.
@@ -829,7 +838,7 @@ sealed class SnowWorld
             // the middle of the brush takes the most, the edges feather out
             float t = 1 - MathF.Abs(c - cm) / (Cfg.SweepWidth / Cfg.ColW + 1);
             float take = MathF.Min(p.H[c], bite * MathF.Max(0.25f, t));
-            float top = p.TopY - p.H[c];
+            float top = p.TopY + p.Drop[c] - p.H[c];
             p.H[c] -= take;
             p.Dirty = true;
             float amount = take / 2.2f;
@@ -1241,9 +1250,17 @@ unsafe static class Render
     public static void Pile(uint* buf, int bw, int bh, Pile p, float s)
     {
         int px0 = Math.Max(0, (int)MathF.Floor(p.MinX * s)), px1 = Math.Min(bw - 1, (int)MathF.Ceiling((p.MinX + p.Width) * s));
-        float baseY = p.TopY * s;
-        float shEnd = baseY + 1.5f * s;
-        int yBase = Math.Min(bh, (int)MathF.Ceiling(baseY));
+
+        // The line the snow rests on, in screen pixels. Flat along the window's top edge and
+        // curving away at the corners, so the snow wraps the corner instead of overhanging it.
+        float Base(float px)
+        {
+            float u = ((px + 0.5f) / s - p.MinX) / Cfg.ColW - 0.5f;
+            int c0 = (int)MathF.Floor(u);
+            float fr = u - c0;
+            int ca = Math.Clamp(c0, 0, p.Count - 1), cb = Math.Clamp(c0 + 1, 0, p.Count - 1);
+            return (p.TopY + p.Drop[ca] * (1 - fr) + p.Drop[cb] * fr) * s;
+        }
 
         // Height of the drawn surface at a pixel column: the settled heights interpolated between
         // column centres, plus fine lumps that are too small for the physics to carry but are what
@@ -1268,10 +1285,15 @@ unsafe static class Render
             float h = Surface(px);
             if (h < 0.3f * s) continue;
 
+            float baseY = Base(px);
+            float shEnd = baseY + 1.5f * s;
+            int yBase = Math.Min(bh, (int)MathF.Ceiling(baseY));
+
             // Light from the top-left: the faces turned away from it go slightly grey. The slope is
             // measured over a few pixels, not one — column to column it jumps about, and shading
-            // each column on its own turns the whole pile into vertical stripes.
-            float slope = (Surface(px + 3) - Surface(px - 3)) * -0.1667f;
+            // each column on its own turns the whole pile into vertical stripes. It is the slope of
+            // the snow's own surface, so the curve of the corner counts too.
+            float slope = ((Base(px + 3) - Surface(px + 3)) - (Base(px - 3) - Surface(px - 3))) * 0.1667f;
             float lum = (0.83f - 0.55f * slope) / MathF.Sqrt(slope * slope + 1);
             float shade = Math.Clamp(0.80f + 0.25f * lum, 0.80f, 1f);
 
@@ -1302,7 +1324,7 @@ unsafe static class Render
             if (p.Occ[c] || p.H[c] < 4) continue;
             float g = WinterIsComing.Pile.Ripple(c * 1.7f, p.Seed + 3);
             float depth = 0.35f + 0.3f * (0.5f + 0.5f * g);
-            FillCircle(buf, bw, bh, (p.ColX(c) + g * 1.1f) * s, baseY - p.H[c] * s * depth,
+            FillCircle(buf, bw, bh, (p.ColX(c) + g * 1.1f) * s, (p.TopY + p.Drop[c]) * s - p.H[c] * s * depth,
                        MathF.Max(0.7f, (0.8f + 0.5f * g) * s), 0.72f, 0.78f, 0.91f, 0.42f);
         }
     }
