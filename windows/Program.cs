@@ -55,12 +55,12 @@ static class Cfg
 
     // Fairy lights, hung just under the top edge of every window. Off unless you ask for them.
     public static bool Lights = true;
-    public const float LightSpacing = 33;          // distance between bulbs
-    public const float LightSpan = 150;            // distance between the points the wire is hooked at
-    public const float LightSag = 6;               // how far the wire droops between hooks
-    public const float LightInset = 18;            // keep clear of the window's rounded corners
-    public const float BulbGlow = 12;              // size of a bulb's soft glow
-    public const float BulbCore = 4.2f;            // size of a bulb's bright centre
+    public const float LightSpacing = 22;          // distance between bulbs
+    public const float LightSpan = 120;            // distance between the points the wire is hooked at
+    public const float LightSag = 9;               // how far the wire droops between hooks
+    public const float LightInset = 14;            // keep clear of the window's rounded corners
+    public const float BulbGlow = 19;              // size of a bulb's soft glow
+    public const float BulbCore = 5.5f;            // size of a bulb's bright centre
 }
 
 // Three depth layers: far = small, faint, slow; near = big, bright, fast
@@ -251,7 +251,7 @@ sealed class LightString
         float span = w / MathF.Max(1, MathF.Round(w / Cfg.LightSpan));
         float r = (x - x0) / span;
         float f = r <= 0 ? 0 : MathF.Min(1, r - MathF.Floor(r));
-        return T + 2 + Cfg.LightSag * (1 + swing) * MathF.Sin(MathF.PI * f);
+        return T + 3 + Cfg.LightSag * (1 + swing) * MathF.Sin(MathF.PI * f);
     }
 
     public float BulbX(int i) => L + Cfg.LightInset + (i + 0.5f) * MathF.Max(0, Width - 2 * Cfg.LightInset) / Bulbs.Length;
@@ -1908,14 +1908,14 @@ unsafe static class Render
             {
                 ref var b = ref ls.Bulbs[i];
                 float bx = ls.BulbX(i) + sway * (0.6f + 0.4f * MathF.Sin(b.Phase));
-                float by = ls.WireY(ls.BulbX(i), swing) + 3;
+                float by = ls.WireY(ls.BulbX(i), swing) + 4;
                 if (HiddenInFront(w, j, bx, by)) continue;
                 float rev = ls.Reveal(i, t);
                 if (rev <= 0) continue;
                 float k = 0.75f + 0.25f * MathF.Sin(t * b.Speed + b.Phase);
                 int c = b.Colour * 3;
                 float cr = LightString.Colours[c], cg = LightString.Colours[c + 1], cb = LightString.Colours[c + 2];
-                Glow(buf, bw, bh, bx * s, by * s, Cfg.BulbGlow * 0.5f * s, cr, cg, cb, 0.5f * k * rev);
+                Glow(buf, bw, bh, bx * s, by * s, Cfg.BulbGlow * 0.5f * s, cr, cg, cb, 0.8f * k * rev);
                 FillCircle(buf, bw, bh, bx * s, by * s, Cfg.BulbCore * 0.5f * s,
                            cr + (1 - cr) * 0.2f, cg + (1 - cg) * 0.2f, cb + (1 - cb) * 0.2f,
                            (0.85f + 0.15f * k) * rev);
