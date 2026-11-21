@@ -1895,12 +1895,16 @@ static unsafe class Program
     const int GWL_EXSTYLE = -20;
     const uint WM_DESTROY = 0x2, WM_TIMER = 0x113, WM_DISPLAYCHANGE = 0x7E, WM_NULL = 0,
                WM_APP = 0x8000, WM_MOUSEMOVE = 0x200, WM_LBUTTONDOWN = 0x201, WM_LBUTTONUP = 0x202,
-               WM_RBUTTONUP = 0x205, WM_CAPTURECHANGED = 0x215;
+               WM_RBUTTONUP = 0x205, WM_CAPTURECHANGED = 0x215, WM_HOTKEY = 0x312;
+    const uint MOD_ALT = 0x1, MOD_CONTROL = 0x2, MOD_NOREPEAT = 0x4000, VK_S = 0x53;
+    const int HOTKEY_ID = 1;
+    static readonly IntPtr HWND_TOPMOST = new(-1);
+    const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10;
     const uint WM_TRAY = WM_APP + 1;
     const int SW_HIDE = 0, SW_SHOWNOACTIVATE = 4;
     const uint ULW_ALPHA = 2;
     const int DWMWA_EXTENDED_FRAME_BOUNDS = 9, DWMWA_CLOAKED = 14;
-    const uint NIM_ADD = 0, NIM_DELETE = 2, NIF_MESSAGE = 1, NIF_ICON = 2, NIF_TIP = 4;
+    const uint NIM_ADD = 0, NIM_MODIFY = 1, NIM_DELETE = 2, NIF_MESSAGE = 1, NIF_ICON = 2, NIF_TIP = 4;
     const uint MF_STRING = 0, MF_CHECKED = 8, MF_POPUP = 0x10, MF_SEPARATOR = 0x800;
     const uint TPM_RIGHTBUTTON = 0x2, TPM_RETURNCMD = 0x100;
     const int CMD_PAUSE = 1, CMD_CLEAR = 2, CMD_QUIT = 3, CMD_BALLS = 4, CMD_PLOW = 5, CMD_AUTOPLOW = 6,
@@ -1966,6 +1970,8 @@ static unsafe class Program
     [DllImport("user32.dll")] static extern void PostQuitMessage(int code);
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int cmd);
     [DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")]
     static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize, IntPtr hdcSrc,
                                            ref POINT pptSrc, uint crKey, ref BLENDFUNCTION pblend, uint flags);
@@ -2013,10 +2019,40 @@ static unsafe class Program
     static readonly Stopwatch clock = Stopwatch.StartNew();
     static double lastT;
     static bool paused;
+
+    /// The one switch: a left click on the tray icon, Ctrl+Alt+S and the menu item all come here
+    static void TogglePause()
+    {
+        paused = !paused;
+        if (paused) { world.MouseUp(); SetClickThrough(true); }
+        ShowWindow(overlay, paused ? SW_HIDE : SW_SHOWNOACTIVATE);
+        if (!paused) KeepOnTop(true);
+        var d = TrayData();
+        d.uFlags = NIF_TIP;
+        d.szTip = paused ? "WinterIsComing — snow paused" : "WinterIsComing ❄";
+        Shell_NotifyIconW(NIM_MODIFY, ref d);
+    }
+
+    /// Put the overlay back on top.
+    ///
+    /// WS_EX_TOPMOST is not a promise. The style bit stays set, but the window can still be pushed
+    /// down the z-order — by another process raising itself, by a shell restart, by a full-screen
+    /// app — and then the snow goes on falling behind every window, which looks exactly like the
+    /// snow having stopped. Nothing tells us when it happens, so we simply put it back once a
+    /// second. Checking first would mean another round of window enumeration for no gain.
+    static float topAcc;
+
+    static void KeepOnTop(bool force)
+    {
+        if (paused) return;
+        SetWindowPos(overlay, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        if (force) topAcc = 0;
+    }
     static bool clickThrough = true;          // WS_EX_TRANSPARENT currently set?
     static string diagPath;
     static double lastDiag;
     static readonly List<Win> found = new();
+    static int overlayZ;             // how many accepted windows are in front of the overlay
     static int taskbarZ;                      // how many accepted windows are drawn in front of the taskbar
     static readonly StringBuilder clsName = new(64);
 
@@ -2052,6 +2088,9 @@ static unsafe class Program
         // A hidden window that owns the tray icon and its menu
         tray = CreateWindowExW(WS_EX_TOOLWINDOW, "WinterIsComingWnd", "WinterIsComing tray", WS_POPUP, 0, 0, 0, 0,
                                IntPtr.Zero, IntPtr.Zero, inst, IntPtr.Zero);
+
+        // A switch that works wherever you are, even with the tray icon tucked under the arrow
+        RegisterHotKey(tray, HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_S);
 
         uint dpi = GetDpiForWindow(overlay);
         scale = dpi > 0 ? dpi / 96f : 1;
@@ -2104,8 +2143,14 @@ static unsafe class Program
                 }
                 return IntPtr.Zero;
             case WM_TRAY:
+                // Left click is the switch, right click opens the menu — the Windows convention,
+                // and it means the snow can be stopped without going hunting through a menu.
                 uint ev = (uint)(lParam.ToInt64() & 0xFFFF);
-                if (ev == WM_RBUTTONUP || ev == WM_LBUTTONUP) ShowMenu();
+                if (ev == WM_LBUTTONUP) TogglePause();
+                else if (ev == WM_RBUTTONUP) ShowMenu();
+                return IntPtr.Zero;
+            case WM_HOTKEY:
+                if (wParam.ToInt32() == HOTKEY_ID) TogglePause();
                 return IntPtr.Zero;
             case WM_LBUTTONDOWN:
                 // Only reaches us while the cursor is over a snowball (see SetClickThrough)
@@ -2161,6 +2206,9 @@ static unsafe class Program
         var blend = new BLENDFUNCTION { BlendOp = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };   // AC_SRC_ALPHA
         UpdateLayeredWindow(overlay, screenDC, ref dst, ref size, memDC, ref src, 0, ref blend, ULW_ALPHA);
 
+        topAcc += dt;
+        if (topAcc >= 1) { topAcc = 0; KeepOnTop(false); }
+
         if (diagPath != null && now - lastDiag > 2) { lastDiag = now; WriteDiag(); }
     }
 
@@ -2189,6 +2237,10 @@ static unsafe class Program
                   .Append(overTaskbar ? ", hangs over it -> hides its snow" : ", does not hang over it")
                   .Append("  ").Append(pile).Append('\n');
             }
+            sb.Append($"snow {(paused ? "PAUSED" : "running")}, {world.Flakes.Count} flakes in the air, ")
+              .Append(overlayZ == 0
+                      ? "overlay is in front of every window\n"
+                      : $"OVERLAY IS BEHIND {overlayZ} WINDOW(S) -- the snow is falling out of sight\n");
             sb.Append($"snowballs {world.Balls.Count}, plough ")
               .Append(world.Plow == null ? "not on screen" : $"at x={world.Plow.X:0} dir {world.Plow.Dir} heap {world.Plow.Heap:0}")
               .Append($", runs so far {Snowplow.Runs}, auto {world.AutoPlow}\n");
@@ -2218,7 +2270,8 @@ static unsafe class Program
 
     static bool EnumProc(IntPtr h, IntPtr _)
     {
-        if (h == overlay || h == tray) return true;
+        if (h == overlay) { overlayZ = found.Count; return true; }
+        if (h == tray) return true;
         if (!IsWindowVisible(h) || IsIconic(h)) return true;
 
         clsName.Clear();
@@ -2296,7 +2349,8 @@ static unsafe class Program
     static void ShowMenu()
     {
         IntPtr menu = CreatePopupMenu(), amount = CreatePopupMenu(), breeze = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING, (UIntPtr)CMD_PAUSE, paused ? "Resume snow" : "Pause snow");
+        AppendMenuW(menu, MF_STRING, (UIntPtr)CMD_PAUSE,
+                    (paused ? "Resume snow" : "Pause snow") + "\tCtrl+Alt+S");
         AppendMenuW(amount, MF_STRING | (Cfg.TargetFlakes == 120 ? MF_CHECKED : 0), (UIntPtr)CMD_LIGHT, "Light");
         AppendMenuW(amount, MF_STRING | (Cfg.TargetFlakes == 260 ? MF_CHECKED : 0), (UIntPtr)CMD_MEDIUM, "Medium");
         AppendMenuW(amount, MF_STRING | (Cfg.TargetFlakes == 500 ? MF_CHECKED : 0), (UIntPtr)CMD_HEAVY, "Heavy");
@@ -2323,11 +2377,7 @@ static unsafe class Program
 
         switch (cmd)
         {
-            case CMD_PAUSE:
-                paused = !paused;
-                if (paused) { world.MouseUp(); SetClickThrough(true); }
-                ShowWindow(overlay, paused ? SW_HIDE : SW_SHOWNOACTIVATE);
-                break;
+            case CMD_PAUSE: TogglePause(); break;
             case CMD_BALLS:
                 Cfg.Snowballs = !Cfg.Snowballs;
                 if (!Cfg.Snowballs) SetClickThrough(true);

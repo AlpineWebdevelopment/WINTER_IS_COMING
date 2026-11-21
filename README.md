@@ -59,7 +59,7 @@ cd WINTER_IS_COMING/windows
 dotnet run -c Release
 ```
 
-Use the ❄ icon in the system tray to pause, pick the snow amount, turn snowballs on or off, clear the snow, or quit. You'll need the [.NET 8 SDK](https://dotnet.microsoft.com/download) (`winget install Microsoft.DotNet.SDK.8`).
+**Left-click the ❄ icon** near the clock to stop and start the snow, or press **Ctrl+Alt+S** from anywhere. Right-click it for the rest: the snow amount, wind, snowballs, the snowplough, fairy lights, clearing the snow and quitting. If you can't see the ❄, it's under the **^** arrow in the tray — drag it out onto the taskbar and it stays there. You'll need the [.NET 8 SDK](https://dotnet.microsoft.com/download) (`winget install Microsoft.DotNet.SDK.8`).
 
 It plays the same way as the Mac version: **slide your mouse sideways over the snow** to roll a ball (no clicking), roll one ball into another to **push** it, **hold the left button** on a ball to carry it, and **stack three** to get a snowman with a carrot nose and a red scarf. A ball pushed off an edge falls and bursts into a heap of snow. The overlay only catches your clicks while the cursor is actually over a snowball, so everything else stays clickable.
 
