@@ -745,8 +745,17 @@ sealed class SnowWorld
             }
             if (!gone)
             {
-                // Flakes that fall "behind" a window disappear
-                if (!f.InFront) foreach (var w in Order) if (w.Contains(f.X, f.Y)) { gone = true; break; }
+                // Flakes that fall "behind" a window disappear. Test the bottom of the disc, not its
+                // centre: a flake is Size * 1.1 across, so going by the centre let it be drawn with
+                // its lower sliver already below the window edge for a frame before being swallowed.
+                // On a maximised window, whose top edge is the top of the screen, that is a white
+                // blob flashing along the very top and vanishing again, several times a second.
+                if (!f.InFront)
+                {
+                    float bottom = f.Y + f.Size * 1.1f;
+                    foreach (var w in Order)
+                        if (f.X >= w.L && f.X < w.R && bottom >= w.T && f.Y < w.B) { gone = true; break; }
+                }
                 if (f.Y > H + 20) gone = true;
                 if (f.Clump && (f.X < -80 || f.X > W + 80)) gone = true;
             }
