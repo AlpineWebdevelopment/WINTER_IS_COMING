@@ -22,7 +22,9 @@ static class Cfg
 {
     public static int TargetFlakes = 260;          // number of flakes falling at the same time
     public const float ColW = 3;                   // width of one column of the snow height map
-    public const float WindowPileMax = 16;         // max snow height on top of a window
+    public const float WindowPileMax = 22;         // max snow height on top of a window
+    public const float TopMargin = WindowPileMax + 2;  // a window's snow line never goes above this, so
+                                                   // maximised windows still get a visible band of snow
     public const float GroundPileMax = 34;         // max snow height at the bottom of the screen
     public const float TaskbarPileMax = 18;        // max snow height on the taskbar
     public const float TaskbarGain = 2.0f;         // snow on the taskbar builds up this much faster
@@ -31,7 +33,8 @@ static class Cfg
     public const int MaxClumps = 900;              // max number of falling snow clumps at once
     public const float FallSpeed = 1.5f;           // falling speed multiplier
     public const bool FlakesInFront = true;        // some of the smallest flakes fall in front of windows
-    public const float InFrontFraction = 0.4f;     // share of the smallest layer that falls in front
+    public const float InFrontFraction = 0.55f;    // share of the smallest layer that falls in front
+                                                   // (keeps the sky snowing over a maximised window)
     public const int FrameMs = 16;                 // timer interval (~60 fps)
     public const float BallStart = 3;              // a new snowball starts this small
     public const float BallMax = 28;               // and stops growing at this size
@@ -167,6 +170,23 @@ sealed class Snowball
     }
 }
 
+// MARK: - Snowplough
+//
+// A little truck that drives along the bottom of the screen, scraping the snow off the taskbar
+// and shoving a growing heap along in front of its blade. Snowballs in the way get rolled along too.
+
+sealed class Snowplow
+{
+    public float X;             // the tip of the blade
+    public int Dir = 1;         // +1 drives right, -1 drives left
+    public float Heap;          // how much snow is piled up in front of the blade
+    public float Wheel;         // wheel rotation
+
+    public const float Speed = 165;       // logical px per second
+    public const float Length = 42;       // body length behind the blade
+    public const float HeapMax = 420;
+}
+
 record struct Win(long Id, float L, float T, float R, float B)
 {
     public float Width => R - L;
@@ -194,6 +214,12 @@ sealed class SnowWorld
     public bool GroundIsTaskbar;
     float pollAcc, t;
     const long GroundId = -2;
+
+    // Snowplough
+    public Snowplow Plow;
+    public bool AutoPlow;
+    public float AutoPlowEvery = 150;     // seconds between automatic runs
+    float plowAcc;
 
     // Snowballs
     public readonly List<Snowball> Balls = new();
@@ -340,6 +366,65 @@ sealed class SnowWorld
             activeBall = null;
             dragBall = null;
         }
+
+        StepPlow(dt);
+    }
+
+    // MARK: Snowplough
+
+    public void SendPlow()
+    {
+        if (Plow != null) return;
+        int dir = Rnd.F(0, 1) < 0.5f ? 1 : -1;
+        Plow = new Snowplow { Dir = dir, X = dir > 0 ? -Snowplow.Length - 10 : W + Snowplow.Length + 10 };
+        plowAcc = 0;
+    }
+
+    void StepPlow(float dt)
+    {
+        if (Plow == null)
+        {
+            if (!AutoPlow) { plowAcc = 0; return; }
+            plowAcc += dt;
+            if (plowAcc >= AutoPlowEvery && Ground.Total > 80) SendPlow();
+            return;
+        }
+
+        var p = Plow;
+        float step = Snowplow.Speed * dt * p.Dir;
+        p.X += step;
+        p.Wheel += step / 5f;
+
+        // Scrape the ground clean from the blade backwards
+        float from = p.Dir > 0 ? p.X - Snowplow.Length : p.X;
+        float to = p.Dir > 0 ? p.X : p.X + Snowplow.Length;
+        int c0 = Ground.Col(MathF.Max(from, Ground.MinX));
+        int c1 = Ground.Col(MathF.Min(to, Ground.MinX + Ground.Width - 0.1f));
+        if (c0 >= 0 && c1 >= 0)
+        {
+            for (int c = c0; c <= c1; c++)
+            {
+                if (Ground.Occ[c] || Ground.H[c] <= 0) continue;
+                p.Heap = MathF.Min(Snowplow.HeapMax, p.Heap + Ground.H[c]);
+                Ground.H[c] = 0;
+            }
+            Ground.Dirty = true;
+        }
+
+        // Shove snowballs along in front of the blade
+        foreach (var b in Balls)
+        {
+            if (b.Falling || b.Dragging || b.Pile != Ground || b.Below != null) continue;
+            float gap = (b.X - p.X) * p.Dir;
+            if (gap > b.R + 4 || gap < -(Snowplow.Length + b.R)) continue;
+            float need = p.X + p.Dir * (b.R + 4);
+            float lo = Ground.MinX + b.R, hi = Ground.MinX + Ground.Width - b.R;
+            if (need >= lo && need <= hi) Roll(b, Ground, need);
+        }
+
+        // Off the far edge: the heap goes with it
+        if ((p.Dir > 0 && p.X > W + Snowplow.Length + 20) || (p.Dir < 0 && p.X < -Snowplow.Length - 20))
+            Plow = null;
     }
 
     void PollWindows(float dt, List<Win> wins, float? taskbarTop)
@@ -1142,6 +1227,73 @@ unsafe static class Render
         }
     }
 
+    // MARK: Snowplough
+
+    static readonly float[] pvx = new float[4], pvy = new float[4];
+
+    /// Axis-aligned rounded box, given in screen pixels
+    static void Box(uint* buf, int bw, int bh, float xa, float xb, float ya, float yb, float round,
+                    float cr, float cg, float cb)
+    {
+        float lo = MathF.Min(xa, xb), hi = MathF.Max(xa, xb);
+        float top = MathF.Min(ya, yb), bot = MathF.Max(ya, yb);
+        float r = MathF.Max(0, MathF.Min(round, MathF.Min((hi - lo) * 0.5f, (bot - top) * 0.5f)));
+        pvx[0] = lo + r; pvy[0] = top + r;
+        pvx[1] = hi - r; pvy[1] = top + r;
+        pvx[2] = hi - r; pvy[2] = bot - r;
+        pvx[3] = lo + r; pvy[3] = bot - r;
+        FillPoly(buf, bw, bh, pvx, pvy, 4, r, cr, cg, cb, 1);
+    }
+
+    public static void PlowTruck(uint* buf, int bw, int bh, Snowplow p, float groundTop, float s)
+    {
+        float d = p.Dir, gy = groundTop * s;
+        float SX(float lx) => (p.X + d * lx) * s;     // local x: 0 is the blade tip, negative is behind
+        float SY(float ly) => gy + ly * s;            // local y: 0 is the ground, negative is up
+
+        // the heap of snow being shoved along in front of the blade
+        if (p.Heap > 1)
+        {
+            float hh = MathF.Min(20, MathF.Sqrt(p.Heap) * 0.95f);
+            float hw = hh * 2.3f;
+            pvx[0] = SX(-1); pvy[0] = SY(-hh);
+            pvx[1] = SX(hw); pvy[1] = SY(-1.5f);
+            pvx[2] = SX(hw); pvy[2] = SY(0);
+            pvx[3] = SX(-1); pvy[3] = SY(0);
+            FillPoly(buf, bw, bh, pvx, pvy, 4, 2.2f * s, 0.98f, 0.99f, 1f, 0.97f);
+        }
+
+        // wheels
+        for (int k = 0; k < 2; k++)
+        {
+            float wx = SX(k == 0 ? -32 : -13), wy = SY(-6), wr = 5.6f * s;
+            FillCircle(buf, bw, bh, wx, wy, wr, 0.13f, 0.14f, 0.16f, 1);
+            FillCircle(buf, bw, bh, wx, wy, wr * 0.45f, 0.55f, 0.57f, 0.62f, 1);
+            for (int t = 0; t < 3; t++)   // spokes, so you can see it roll
+            {
+                float a = p.Wheel + t * 2.0944f;
+                FillSegment(buf, bw, bh, wx, wy, wx + MathF.Cos(a) * wr * 0.8f, wy + MathF.Sin(a) * wr * 0.8f,
+                            MathF.Max(0.6f, 0.9f * s), 0.42f, 0.44f, 0.48f, 1);
+            }
+        }
+
+        // body, cab and window
+        Box(buf, bw, bh, SX(-41), SX(-7), SY(-20), SY(-6), 2.5f * s, 0.95f, 0.55f, 0.10f);
+        Box(buf, bw, bh, SX(-31), SX(-15), SY(-31), SY(-19), 2.5f * s, 0.93f, 0.50f, 0.09f);
+        Box(buf, bw, bh, SX(-29), SX(-17), SY(-29), SY(-23), 1.4f * s, 0.35f, 0.47f, 0.58f);
+
+        // amber beacon on the roof
+        FillCircle(buf, bw, bh, SX(-23), SY(-33), 2.6f * s, 1f, 0.72f, 0.15f, 1);
+        FillCircle(buf, bw, bh, SX(-23), SY(-33), 5.5f * s, 1f, 0.72f, 0.15f, 0.22f);
+
+        // the blade: a steel plate raked forward
+        pvx[0] = SX(-7); pvy[0] = SY(-3);
+        pvx[1] = SX(-2); pvy[1] = SY(-23);
+        pvx[2] = SX(3); pvy[2] = SY(-21.5f);
+        pvx[3] = SX(-1.5f); pvy[3] = SY(0);
+        FillPoly(buf, bw, bh, pvx, pvy, 4, 1.2f * s, 0.74f, 0.78f, 0.84f, 1);
+    }
+
     static readonly List<Snowball> drawList = new();
 
     public static void World(uint* buf, int bw, int bh, SnowWorld w, float s)
@@ -1166,6 +1318,8 @@ unsafe static class Render
             foreach (var ball in drawList)                 // the ball in your hand goes on top
                 if (ball.Dragging && !ball.Hidden) Ball(buf, bw, bh, ball, s);
         }
+
+        if (w.Plow != null) PlowTruck(buf, bw, bh, w.Plow, w.Ground.TopY, s);
 
         foreach (var f in w.Flakes) if (f.Clump || f.Layer == 2) Disc(buf, bw, bh, f.X * s, f.Y * s, f.Size * 1.1f * s, f.Alpha);
     }
@@ -1215,7 +1369,7 @@ static unsafe class Program
     const uint NIM_ADD = 0, NIM_DELETE = 2, NIF_MESSAGE = 1, NIF_ICON = 2, NIF_TIP = 4;
     const uint MF_STRING = 0, MF_CHECKED = 8, MF_POPUP = 0x10, MF_SEPARATOR = 0x800;
     const uint TPM_RIGHTBUTTON = 0x2, TPM_RETURNCMD = 0x100;
-    const int CMD_PAUSE = 1, CMD_CLEAR = 2, CMD_QUIT = 3, CMD_BALLS = 4,
+    const int CMD_PAUSE = 1, CMD_CLEAR = 2, CMD_QUIT = 3, CMD_BALLS = 4, CMD_PLOW = 5, CMD_AUTOPLOW = 6,
               CMD_LIGHT = 10, CMD_MEDIUM = 11, CMD_HEAVY = 12;
 
     // --- structs
@@ -1482,7 +1636,11 @@ static unsafe class Program
         // The visible frame (GetWindowRect includes invisible resize borders on Windows 10/11)
         if (DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, out RECT rc, Marshal.SizeOf<RECT>()) != 0)
             GetWindowRect(h, out rc);
-        float l = rc.Left / scale, t = rc.Top / scale, r = rc.Right / scale, b = rc.Bottom / scale;
+        float l = rc.Left / scale, r = rc.Right / scale, b = rc.Bottom / scale;
+        // A maximised window's real top edge is off the screen, so its snow would pile up where nobody
+        // can see it. Push the top edge down far enough for the pile to fit; the snow then sits on the
+        // window's own title bar instead of above it, and flakes stop vanishing into the window first.
+        float t = MathF.Max(rc.Top / scale, Cfg.TopMargin);
         if (r - l < 80 || b - t < 40) return true;
         found.Add(new Win(h.ToInt64(), l, t, r, b));
         return true;
@@ -1540,6 +1698,10 @@ static unsafe class Program
         AppendMenuW(amount, MF_STRING | (Cfg.TargetFlakes == 500 ? MF_CHECKED : 0), (UIntPtr)CMD_HEAVY, "Heavy");
         AppendMenuW(menu, MF_POPUP, (UIntPtr)(ulong)amount.ToInt64(), "Snow amount");
         AppendMenuW(menu, MF_STRING | (Cfg.Snowballs ? MF_CHECKED : 0), (UIntPtr)CMD_BALLS, "Snowballs && snowmen");
+        AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, null);
+        AppendMenuW(menu, MF_STRING, (UIntPtr)CMD_PLOW, "Send the snowplough");
+        AppendMenuW(menu, MF_STRING | (world.AutoPlow ? MF_CHECKED : 0), (UIntPtr)CMD_AUTOPLOW, "Snowplough comes by itself");
+        AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, null);
         AppendMenuW(menu, MF_STRING, (UIntPtr)CMD_CLEAR, "Clear snow");
         AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, null);
         AppendMenuW(menu, MF_STRING, (UIntPtr)CMD_QUIT, "Quit");
@@ -1561,6 +1723,8 @@ static unsafe class Program
                 Cfg.Snowballs = !Cfg.Snowballs;
                 if (!Cfg.Snowballs) SetClickThrough(true);
                 break;
+            case CMD_PLOW: world.SendPlow(); break;
+            case CMD_AUTOPLOW: world.AutoPlow = !world.AutoPlow; break;
             case CMD_LIGHT: Cfg.TargetFlakes = 120; break;
             case CMD_MEDIUM: Cfg.TargetFlakes = 260; break;
             case CMD_HEAVY: Cfg.TargetFlakes = 500; break;

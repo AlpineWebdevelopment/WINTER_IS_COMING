@@ -63,6 +63,10 @@ Use the ❄ icon in the system tray to pause, pick the snow amount, turn snowbal
 
 It plays the same way as the Mac version: **slide your mouse sideways over the snow** to roll a ball (no clicking), roll one ball into another to **push** it, **hold the left button** on a ball to carry it, and **stack three** to get a snowman with a carrot nose and a red scarf. A ball pushed off an edge falls and bursts into a heap of snow. The overlay only catches your clicks while the cursor is actually over a snowball, so everything else stays clickable.
 
+**Snowplough** 🚜 — send a little truck down the bottom of the screen from the ❄ menu and it scrapes the taskbar clean, shoving a growing heap of snow (and any snowball in its way) along in front of its blade. Tick *Snowplough comes by itself* and one turns up every couple of minutes.
+
+A note on **maximised windows**: their real top edge is off the screen, so snow piled on it would be invisible. The Windows build pushes the snow line down just far enough to fit, which means the snow settles on the window's own title bar — there is always a visible band of it, even with everything full-screen.
+
 Still Mac-only for now: the fairy lights.
 
 ## Make it yours 🎨
