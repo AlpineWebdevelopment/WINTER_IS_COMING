@@ -1600,10 +1600,15 @@ unsafe static class Render
     }
 
     /// A snowball: lit from the top-left, bluish shade at the bottom-right, with specks that rotate as it rolls
-    public static void Ball(uint* buf, int bw, int bh, Snowball ball, float s)
+    public static void Ball(uint* buf, int bw, int bh, Snowball ball, float s, float lightBg)
     {
         float cx = ball.X * s, cy = ball.Y * s, r = ball.R * s;
         if (r < 0.5f) return;
+        // Over a white page the blue shading reads as a blue ball, and a white sphere on white has
+        // no outline at all. So the shaded side goes neutral and the silhouette picks up the same
+        // cool grey edge the piles use — both only as far as the background is light.
+        float farR = 0.26f - 0.02f * lightBg, farG = 0.21f + 0.03f * lightBg, farB = 0.12f + 0.12f * lightBg;
+        float rimW = MathF.Max(1.2f, 2.0f * s);
         int x0 = Math.Max(0, (int)MathF.Floor(cx - r - 1)), x1 = Math.Min(bw - 1, (int)MathF.Ceiling(cx + r + 1));
         int y0 = Math.Max(0, (int)MathF.Floor(cy - r - 1)), y1 = Math.Min(bh - 1, (int)MathF.Ceiling(cy + r + 1));
         float lx = cx - 0.24f * r, ly = cy - 0.28f * r;     // where the light comes from
@@ -1614,13 +1619,21 @@ unsafe static class Render
             for (int x = x0; x <= x1; x++)
             {
                 float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
-                float cov = Math.Clamp(r - MathF.Sqrt(dx * dx + dy * dy) + 0.5f, 0, 1);
+                float dist = MathF.Sqrt(dx * dx + dy * dy);
+                float cov = Math.Clamp(r - dist + 0.5f, 0, 1);
                 if (cov <= 0) continue;
                 float ex = x + 0.5f - lx, ey = y + 0.5f - ly;
                 float tt = Math.Clamp(MathF.Sqrt(ex * ex + ey * ey) * invEnd, 0, 1);
                 float cr, cg, cb;
                 if (tt < 0.55f) { float u = tt / 0.55f; cr = 1 - 0.06f * u; cg = 1 - 0.04f * u; cb = 1; }
-                else { float u = (tt - 0.55f) / 0.45f; cr = 0.94f - 0.26f * u; cg = 0.96f - 0.21f * u; cb = 1 - 0.12f * u; }
+                else { float u = (tt - 0.55f) / 0.45f; cr = 0.94f - farR * u; cg = 0.96f - farG * u; cb = 1 - farB * u; }
+                float edge = Math.Clamp((dist - (r - rimW)) / rimW, 0, 1) * lightBg * 0.8f;
+                if (edge > 0)
+                {
+                    cr += (0.55f - cr) * edge;
+                    cg += (0.58f - cg) * edge;
+                    cb += (0.64f - cb) * edge;
+                }
                 Blend(row + x, cov, cr, cg, cb);
             }
         }
@@ -1632,7 +1645,8 @@ unsafe static class Render
             float sz = ball.Specks[i * 4 + 2], al = ball.Specks[i * 4 + 3];
             float ux = MathF.Cos(a) * rad, uy = MathF.Sin(a) * rad;
             float px = cx + (ux * rc - uy * rs) * r, py = cy + (ux * rs + uy * rc) * r;
-            FillCircle(buf, bw, bh, px, py, MathF.Max(0.6f, sz * r), 0.66f, 0.73f, 0.87f, al);
+            FillCircle(buf, bw, bh, px, py, MathF.Max(0.6f, sz * r),
+                       0.66f + 0.02f * lightBg, 0.73f - 0.03f * lightBg, 0.87f - 0.13f * lightBg, al);
         }
     }
 
@@ -2348,11 +2362,11 @@ unsafe static class Render
             foreach (var ball in drawList)
             {
                 if (ball.Hidden || ball.Dragging) continue;
-                Ball(buf, bw, bh, ball, s);
+                Ball(buf, bw, bh, ball, s, w.Ground.BgLight);
                 if (ball.Decor != 0) Decor(buf, bw, bh, ball, s);
             }
             foreach (var ball in drawList)                 // the ball in your hand goes on top
-                if (ball.Dragging && !ball.Hidden) Ball(buf, bw, bh, ball, s);
+                if (ball.Dragging && !ball.Hidden) Ball(buf, bw, bh, ball, s, w.Ground.BgLight);
         }
 
         if (w.Plow != null) Plough(buf, bw, bh, w, s);
