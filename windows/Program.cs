@@ -2569,33 +2569,34 @@ unsafe static class Render
         foreach (var f in w.Flakes) if (f.Clump || f.Layer == 2) Disc(buf, bw, bh, f.X * s, f.Y * s, f.Size * 1.1f * s, f.Alpha);
     }
 
-    // The tray icon: a six-armed dendrite — tapered arms, two pairs of side branches, a hexagonal
-    // plate at the middle — in white with a deep blue outline, so it reads on a dark taskbar and on
-    // a pale one. Drawn at the size the tray actually asks for and supersampled, so at 16 px it is
-    // crisp rather than a shrunken 32 px blur. Straight alpha, as icons expect.
+    // The tray icon: a six-armed dendrite, but a solid one — the distance to the shape is turned
+    // into a height, and that height is lit from the top left, so the arms have a rounded face, a
+    // highlight along their upper edge and a shadow underneath. Drawn at the size the tray actually
+    // asks for and supersampled, so none of it is lost to shrinking. Straight alpha, as icons expect.
     public static void TrayIcon(uint* buf, int n)
     {
-        const int SS = 8;                       // samples across one pixel, each way
+        const int SS = 6;                       // samples across one pixel, each way
         float c = n / 2f;
         float u = n / 16f;                      // the design is drawn for 16 px and scaled from there
-        float ow = 0.62f * u;                   // how far the outline reaches past the flake
-        float L = n / 2f - ow - 0.3f;           // how far one arm reaches
+        float ow = 0.34f * u;                   // the dark edge around the ice
+        float L = n / 2f - ow - 0.9f * u;       // how far one arm reaches, leaving room for the shadow
+        float bev = 0.70f * u;                  // how far in from the edge the face levels off
+        float dep = 1.00f * u;                   // how proud of the surface the ice stands
 
         // One arm, pointing along +x: x0, y0, x1, y1, half-width. The other five are this one
         // turned 60° at a time, and each arm is mirrored about its own axis.
         var seg = new List<float[]>();
         void Seg(float ax, float ay, float bx, float by, float hw) => seg.Add(new[] { ax, ay, bx, by, hw });
 
-        Seg(0, 0, L * 0.52f, 0, 0.48f * u);     // the shaft, thinning towards the tip
-        Seg(L * 0.52f, 0, L * 0.84f, 0, 0.44f * u);
-        Seg(L * 0.84f, 0, L, 0, 0.34f * u);
+        Seg(0, 0, L * 0.52f, 0, 0.82f * u);     // the shaft, thinning towards the tip
+        Seg(L * 0.52f, 0, L * 0.84f, 0, 0.62f * u);
+        Seg(L * 0.84f, 0, L, 0, 0.48f * u);
 
         float ca = MathF.Cos(1.15f), sa = MathF.Sin(1.15f);   // side branches lean out at ~66°
         void Branch(float at, float len, float hw) => Seg(at, 0, at + len * ca, len * sa, hw);
-        Branch(L * 0.50f, L * 0.30f, 0.34f * u);
-        Branch(L * 0.80f, L * 0.18f, 0.27f * u);
+        Branch(L * 0.58f, L * 0.28f, 0.46f * u);
 
-        float plate = 1.15f * u * MathF.Cos(MathF.PI / 6);     // the hexagonal plate in the middle
+        float plate = 1.70f * u * MathF.Cos(MathF.PI / 6);    // the hexagonal plate in the middle
 
         float Flake(float px, float py)         // distance to the flake, negative inside it
         {
@@ -2623,37 +2624,75 @@ unsafe static class Render
             return MathF.Min(best, hex - plate);
         }
 
+        float Height(float px, float py)        // 0 at the edge, 1 where the face is flat
+        {
+            float sd = Flake(px, py);
+            if (sd >= 0) return 0;
+            float t = Math.Clamp(-sd / bev, 0, 1);
+            return MathF.Sin(t * MathF.PI / 2);
+        }
+
+        // the light: from the top left and a little in front of the screen
+        float lx = -0.50f, ly = -0.66f, lz = 0.56f;
+        float ln = MathF.Sqrt(lx * lx + ly * ly + lz * lz);
+        lx /= ln; ly /= ln; lz /= ln;
+        float eps = 0.30f * u;
+
         for (int y = 0; y < n; y++)
             for (int x = 0; x < n; x++)
             {
-                float ar = 0, ag = 0, ab = 0; int hit = 0;
+                float ar = 0, ag = 0, ab = 0, aa = 0;
                 for (int sy = 0; sy < SS; sy++)
                     for (int sx = 0; sx < SS; sx++)
                     {
                         float px = x + (sx + 0.5f) / SS - c, py = y + (sy + 0.5f) / SS - c;
                         float sd = Flake(px, py);
-                        if (sd > ow) continue;                 // past the outline there is nothing
-                        float rr, gg, bb;
-                        if (sd >= 0)                           // the outline: deep blue, darker outwards
+
+                        // the shadow it throws, down and to the right
+                        float shd = Flake(px - 0.55f * u, py - 0.72f * u);
+                        float sa2 = Math.Clamp(1 - shd / (1.1f * u), 0, 1) * 0.42f;
+                        float r = 0.02f, g = 0.06f, b = 0.17f, a = sa2;
+
+                        if (sd < ow && sd >= 0)                  // the dark edge of the ice
                         {
                             float k = sd / ow;
-                            rr = 0.13f - 0.06f * k; gg = 0.30f - 0.15f * k; bb = 0.62f - 0.28f * k;
+                            r = 0.09f - 0.04f * k; g = 0.21f - 0.09f * k; b = 0.47f - 0.19f * k;
+                            a = 1;
                         }
-                        else                                   // the flake, white and cold underneath
+                        else if (sd < 0)                         // the ice itself, lit from the top left
                         {
+                            float hxp = Height(px + eps, py), hxm = Height(px - eps, py);
+                            float hyp = Height(px, py + eps), hym = Height(px, py - eps);
+                            float nx = -(hxp - hxm) / (2 * eps) * dep;
+                            float ny = -(hyp - hym) / (2 * eps) * dep;
+                            float nl = MathF.Sqrt(nx * nx + ny * ny + 1);
+                            nx /= nl; ny /= nl; float nz = 1 / nl;
+
+                            float dif = MathF.Max(0, nx * lx + ny * ly + nz * lz);
+                            float dot2 = 2 * (nx * lx + ny * ly + nz * lz);
+                            float rz = dot2 * nz - lz;           // the mirror of the light, towards the eye
+                            float spec = rz <= 0 ? 0 : MathF.Pow(rz, 12) * 0.55f;
+
+                            float h = Height(px, py);
                             float t = Math.Clamp((py + L) / (2 * L), 0, 1);
-                            rr = 1 - 0.16f * t; gg = 1 - 0.09f * t; bb = 1;
-                            float e = Math.Clamp(1 + sd / (0.45f * u), 0, 1);  // a cold edge inside the white
-                            rr += (0.72f - rr) * e * 0.22f; gg += (0.85f - gg) * e * 0.22f; bb += (0.99f - bb) * e * 0.22f;
+                            float br = 0.90f - 0.14f * t, bg = 0.95f - 0.08f * t, bb2 = 1.00f;   // ice blue
+                            float sh = 0.78f + 0.40f * dif;      // ambient plus the light
+                            r = br * sh + spec; g = bg * sh + spec; b = bb2 * sh + spec;
+
+                            float ao = (1 - h) * (1 - h) * 0.14f;                // darker where it meets the edge
+                            r += (0.42f - r) * ao; g += (0.62f - g) * ao; b += (0.92f - b) * ao;
+                            a = 1;
                         }
-                        ar += rr; ag += gg; ab += bb; hit++;
+
+                        ar += r * a; ag += g * a; ab += b * a; aa += a;
                     }
 
-                uint a = (uint)MathF.Round(hit / (float)(SS * SS) * 255);
-                uint cr = hit == 0 ? 0 : (uint)MathF.Round(Math.Clamp(ar / hit, 0, 1) * 255);
-                uint cg = hit == 0 ? 0 : (uint)MathF.Round(Math.Clamp(ag / hit, 0, 1) * 255);
-                uint cb = hit == 0 ? 0 : (uint)MathF.Round(Math.Clamp(ab / hit, 0, 1) * 255);
-                buf[y * n + x] = (a << 24) | (cr << 16) | (cg << 8) | cb;
+                float alpha = aa / (SS * SS);
+                uint A = (uint)MathF.Round(Math.Clamp(alpha, 0, 1) * 255);
+                uint cr = aa <= 0 ? 0 : (uint)MathF.Round(Math.Clamp(ar / aa, 0, 1) * 255);
+                uint cg = aa <= 0 ? 0 : (uint)MathF.Round(Math.Clamp(ag / aa, 0, 1) * 255);
+                uint cb = aa <= 0 ? 0 : (uint)MathF.Round(Math.Clamp(ab / aa, 0, 1) * 255);
+                buf[y * n + x] = (A << 24) | (cr << 16) | (cg << 8) | cb;
             }
     }
 }
