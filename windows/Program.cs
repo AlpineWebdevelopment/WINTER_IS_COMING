@@ -43,6 +43,8 @@ static class Cfg
     public const float BallMax = 28;               // and stops growing at this size
     public const int MaxBalls = 20;                // oldest resting snowballs are removed beyond this
     public static bool Snowballs = true;           // rolling snowballs and snowmen on / off
+    public const float SweepWidth = 14;            // how wide a brush the cursor is on a window's snow line
+    public const float SweepBite = 1.1f;           // snow taken per logical px of cursor travel
 
     // Wind. The ambient gusts are always there; this is the steady breeze on top of them, from
     // -1 (hard from the right) through 0 (calm) to +1 (hard from the left).
@@ -408,7 +410,10 @@ sealed class SnowWorld
     {
         var f = Obtain();
         f.Clump = true;
-        f.InFront = false;
+        // Snow coming off a surface slides down the FRONT of whatever is below it. Without this a
+        // clump is swallowed the moment it enters a window's rectangle, so dragging a window looked
+        // like its snow blinking out of existence instead of tumbling down the window.
+        f.InFront = true;
         f.OnTop = false;
         f.Layer = 2;
         f.Size = Rnd.F(2.5f, 5);
@@ -771,6 +776,50 @@ sealed class SnowWorld
         return null;
     }
 
+    /// The window snow line under the cursor, if any, with the window it belongs to
+    (Pile Pile, long Id) WindowLineUnderMouse(float mx, float my)
+    {
+        foreach (var w in Order)
+        {
+            if (Piles.TryGetValue(w.Id, out var p) && MouseOver(p, mx, my)) return (p, w.Id);
+            if (w.Contains(mx, my)) return (null, 0);       // over a window's content
+        }
+        return (null, 0);
+    }
+
+    /// Brush snow off a window's top edge. No ball is made — that is the whole point of keeping
+    /// them on the ground — the snow just comes loose and tumbles down the front of the window.
+    void Sweep(Pile p, long id, float mx, float dx)
+    {
+        int c0 = Math.Max(0, p.Col(mx - Cfg.SweepWidth));
+        int cm = p.Col(mx);
+        int c1 = p.Col(mx + Cfg.SweepWidth);
+        if (c1 < 0) c1 = p.Count - 1;
+        if (cm < 0) return;
+        float push = Math.Clamp(dx * 22, -420, 420);
+        float bite = MathF.Max(1.2f, MathF.Abs(dx) * Cfg.SweepBite);
+        int budget = Math.Max(0, Cfg.MaxClumps - Flakes.Count + Cfg.TargetFlakes);
+        for (int c = c0; c <= c1 && budget > 0; c++)
+        {
+            if (p.Occ[c] || p.H[c] <= 0.3f) continue;
+            // the middle of the brush takes the most, the edges feather out
+            float t = 1 - MathF.Abs(c - cm) / (Cfg.SweepWidth / Cfg.ColW + 1);
+            float take = MathF.Min(p.H[c], bite * MathF.Max(0.25f, t));
+            float top = p.TopY - p.H[c];
+            p.H[c] -= take;
+            p.Dirty = true;
+            float amount = take / 2.2f;
+            while (amount > 0 && budget > 0)
+            {
+                if (amount < 1 && Rnd.F(0, 1) > amount) break;
+                SpawnClump(p.ColX(c) + Rnd.F(-1.5f, 1.5f), top + Rnd.F(0, take),
+                           push + Rnd.F(-50, 50), -Rnd.F(20, 90), id);
+                budget--;
+                amount -= 1;
+            }
+        }
+    }
+
     void UpdateRolling(float mx, float my)
     {
         if (!haveMouse) { haveMouse = true; lastMx = mx; lastMy = my; }
@@ -778,7 +827,16 @@ sealed class SnowWorld
         lastMx = mx; lastMy = my;
 
         var p = SurfaceUnderMouse(mx, my);
-        if (p == null) { activeBall = null; return; }
+        if (p == null)
+        {
+            activeBall = null;
+            if (MathF.Abs(dx) > 0.2f)
+            {
+                var (wp, id) = WindowLineUnderMouse(mx, my);
+                if (wp != null) Sweep(wp, id, mx, dx);
+            }
+            return;
+        }
         if (MathF.Abs(dx) <= 0.2f) return;
 
         // Keep rolling the current ball, pick up a resting one under the mouse, or start a new one
