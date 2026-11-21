@@ -23,8 +23,8 @@ static class Cfg
     public static int TargetFlakes = 260;          // number of flakes falling at the same time
     public const float ColW = 3;                   // width of one column of the snow height map
     public const float WindowPileMax = 22;         // max snow height on top of a window
-    public const float TopMargin = WindowPileMax + 2;  // a window's snow line never goes above this, so
-                                                   // maximised windows still get a visible band of snow
+    public const float MinPileDepth = 3;           // below this there is no room for a snow line at all,
+                                                   // so a maximised window simply doesn't get one
     public const float GroundPileMax = 34;         // max snow height at the bottom of the screen
     public const float TaskbarPileMax = 18;        // max snow height on the taskbar
     public const float TaskbarGain = 2.0f;         // snow on the taskbar builds up this much faster
@@ -454,26 +454,36 @@ sealed class SnowWorld
 
         foreach (var r in wins)
         {
-            if (Piles.TryGetValue(r.Id, out var pile) && lastRect.TryGetValue(r.Id, out var old))
+            // The snow line sits above the window's top edge, so it can only be as deep as the room
+            // left above it. A maximised window has none and gets no snow line at all — better than a
+            // white band glued to the top of the screen, and the windows in front of it still get theirs.
+            float depth = MathF.Min(Cfg.WindowPileMax, r.T - 1);
+            Piles.TryGetValue(r.Id, out var pile);
+            bool known = lastRect.TryGetValue(r.Id, out var old);
+
+            if (depth < Cfg.MinPileDepth)
             {
-                if (MathF.Abs(old.Width - r.Width) > 0.5f)
-                {
-                    // Width changed: drop the snow and start a new pile
-                    Release(pile, 0, 0, r.Id);
-                    Piles[r.Id] = new Pile(r.L, r.T, r.Width, Cfg.WindowPileMax);
-                }
-                else if (MathF.Abs(old.L - r.L) > 0.3f || MathF.Abs(old.T - r.T) > 0.3f)
-                {
-                    // Window dragged: fling the snow off
-                    float vx = (r.L - old.L) / dt, vy = (r.T - old.T) / dt;
-                    pile.MinX = r.L;
-                    pile.TopY = r.T;
-                    Release(pile, vx, vy, r.Id);
-                }
+                if (pile != null) { Release(pile, 0, 0, r.Id); Piles.Remove(r.Id); }
             }
-            else
+            else if (pile == null || !known)
             {
-                Piles[r.Id] = new Pile(r.L, r.T, r.Width, Cfg.WindowPileMax);
+                if (pile != null) Release(pile, 0, 0, r.Id);
+                Piles[r.Id] = new Pile(r.L, r.T, r.Width, depth);
+            }
+            else if (MathF.Abs(old.Width - r.Width) > 0.5f || MathF.Abs(pile.MaxH - depth) > 0.5f)
+            {
+                // Width changed, or the window moved near enough to the top edge to change how much
+                // snow fits: drop what's there and start a new pile
+                Release(pile, 0, 0, r.Id);
+                Piles[r.Id] = new Pile(r.L, r.T, r.Width, depth);
+            }
+            else if (MathF.Abs(old.L - r.L) > 0.3f || MathF.Abs(old.T - r.T) > 0.3f)
+            {
+                // Window dragged: fling the snow off
+                float vx = (r.L - old.L) / dt, vy = (r.T - old.T) / dt;
+                pile.MinX = r.L;
+                pile.TopY = r.T;
+                Release(pile, vx, vy, r.Id);
             }
             lastRect[r.Id] = r;
         }
@@ -1649,11 +1659,7 @@ static unsafe class Program
         // The visible frame (GetWindowRect includes invisible resize borders on Windows 10/11)
         if (DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, out RECT rc, Marshal.SizeOf<RECT>()) != 0)
             GetWindowRect(h, out rc);
-        float l = rc.Left / scale, r = rc.Right / scale, b = rc.Bottom / scale;
-        // A maximised window's real top edge is off the screen, so its snow would pile up where nobody
-        // can see it. Push the top edge down far enough for the pile to fit; the snow then sits on the
-        // window's own title bar instead of above it, and flakes stop vanishing into the window first.
-        float t = MathF.Max(rc.Top / scale, Cfg.TopMargin);
+        float l = rc.Left / scale, t = rc.Top / scale, r = rc.Right / scale, b = rc.Bottom / scale;
         if (r - l < 80 || b - t < 40) return true;
         found.Add(new Win(h.ToInt64(), l, t, r, b));
         return true;

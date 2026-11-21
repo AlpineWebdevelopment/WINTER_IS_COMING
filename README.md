@@ -65,7 +65,7 @@ It plays the same way as the Mac version: **slide your mouse sideways over the s
 
 **Snowplough** 🚜 — send a little truck down the bottom of the screen from the ❄ menu and it scrapes the taskbar clean, shoving a growing heap of snow (and any snowball in its way) along in front of its blade. Tick *Snowplough comes by itself* and one turns up every couple of minutes.
 
-A note on **maximised windows**, which are far more common on Windows than on a Mac. Their real top edge is off the screen, so snow piled on it would be invisible; the snow line is pushed down just far enough to fit, and the snow settles on the window's own title bar instead. And because a maximised window catches every flake falling behind it, some of the flakes that fall *in front* of the windows settle on the frontmost window covering them — otherwise a window floating over a full-screen one would never collect anything, however far down its edge sits. Every window you can see gets its own snow line, and it follows the window when you move it.
+A note on **maximised windows**, which are far more common on Windows than on a Mac. The snow sits *above* a window's top edge, so a maximised window has no room for it and simply gets no snow line — better than a white band pinned to the edge of the screen. The windows in front of it still get theirs: because a maximised window catches every flake falling behind it, some of the flakes that fall *in front* of the windows settle on the frontmost window covering them instead. So every window you can actually see collects snow on its own top edge, and the line follows the window when you move it.
 
 Still Mac-only for now: the fairy lights.
 
