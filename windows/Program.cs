@@ -56,7 +56,9 @@ static class Cfg
     // A Christmas tree standing in the snow, wherever you drag it
     public static bool Tree = false;
     public static float TreeX = 0.12f;             // across the screen, 0..1
-    public const float TreeH = 134, TreeW = 80;    // what it takes up, for grabbing hold of it
+    public const float TreeScale = 0.78f;          // how big it stands
+    public static float TreeH => 150 * TreeScale;  // what it takes up, for grabbing hold of it
+    public static float TreeW => 88 * TreeScale;
 
     // Keep the snow out of screenshots and screen recordings while leaving it on the screen
     public static bool HideFromCapture = true;
@@ -2389,20 +2391,21 @@ unsafe static class Render
         float bx = Cfg.TreeX * w.W, by = w.Ground.TopY + 3;
         float light = w.Ground.BgLight;
         float o = MathF.Max(0.7f, 0.5f * s);
-        float X(float lx) => (bx + lx) * s;
-        float Y(float ly) => (by - ly) * s;
+        float k = Cfg.TreeScale, u = k * s;            // one knob for how big the whole thing is
+        float X(float lx) => (bx + lx * k) * s;
+        float Y(float ly) => (by - ly * k) * s;
 
         // a shadow in the snow, so it is standing in it rather than on it
-        GradBox(buf, bw, bh, X(-30), X(30), Y(4), Y(-3), 4f * s,
+        GradBox(buf, bw, bh, X(-30), X(30), Y(4), Y(-3), 4f * u,
                 0.05f, 0.07f, 0.12f, 0.05f, 0.07f, 0.12f, 0.18f);
 
         // trunk, with a couple of bark lines
-        GradBox(buf, bw, bh, X(-7.5f) - o, X(7.5f) + o, Y(22) - o, Y(-1) + o, 2.5f * s + o,
+        GradBox(buf, bw, bh, X(-7.5f) - o, X(7.5f) + o, Y(22) - o, Y(-1) + o, 2.5f * u + o,
                 0.14f, 0.09f, 0.05f, 0.14f, 0.09f, 0.05f, 0.9f);
-        GradBox(buf, bw, bh, X(-7.5f), X(7.5f), Y(22), Y(-1), 2.5f * s,
+        GradBox(buf, bw, bh, X(-7.5f), X(7.5f), Y(22), Y(-1), 2.5f * u,
                 0.49f, 0.33f, 0.19f, 0.26f, 0.16f, 0.09f, 1);
-        FillSegment(buf, bw, bh, X(-3.5f), Y(20), X(-3.5f), Y(3), 0.7f * s, 0.33f, 0.21f, 0.12f, 1);
-        FillSegment(buf, bw, bh, X(2.5f), Y(18), X(2.5f), Y(2), 0.6f * s, 0.33f, 0.21f, 0.12f, 1);
+        FillSegment(buf, bw, bh, X(-3.5f), Y(20), X(-3.5f), Y(3), 0.7f * u, 0.33f, 0.21f, 0.12f, 1);
+        FillSegment(buf, bw, bh, X(2.5f), Y(18), X(2.5f), Y(2), 0.6f * u, 0.33f, 0.21f, 0.12f, 1);
 
         for (int i = 0; i < 4; i++)
         {
@@ -2420,7 +2423,7 @@ unsafe static class Render
                 pvx[0] = X(px - wide); pvy[0] = Y(yb + 2f);
                 pvx[1] = X(px + wide); pvy[1] = Y(yb + 2f);
                 pvx[2] = X(px + MathF.Sign(t) * 3f); pvy[2] = Y(yb - drop);
-                GradPoly(buf, bw, bh, pvx, pvy, 3, 1.9f * s,
+                GradPoly(buf, bw, bh, pvx, pvy, 3, 1.9f * u,
                          0.11f, 0.35f, 0.18f, 0.05f, 0.20f, 0.10f, 1);
             }
 
@@ -2432,8 +2435,8 @@ unsafe static class Render
                 pvx[1] = X(hw * sx); pvy[1] = Y(yb);
                 pvx[2] = X(0); pvy[2] = Y(yb);
                 if (side == 0)
-                    GradPoly(buf, bw, bh, pvx, pvy, 3, 1.4f * s + o, 0.03f, 0.13f, 0.07f, 0.03f, 0.13f, 0.07f, 0.85f);
-                GradPoly(buf, bw, bh, pvx, pvy, 3, 1.4f * s,
+                    GradPoly(buf, bw, bh, pvx, pvy, 3, 1.4f * u + o, 0.03f, 0.13f, 0.07f, 0.03f, 0.13f, 0.07f, 0.85f);
+                GradPoly(buf, bw, bh, pvx, pvy, 3, 1.4f * u,
                          side == 0 ? 0.20f : 0.17f, side == 0 ? 0.56f : 0.49f, side == 0 ? 0.29f : 0.26f,
                          side == 0 ? 0.10f : 0.08f, side == 0 ? 0.34f : 0.29f, side == 0 ? 0.17f : 0.15f, 1);
             }
@@ -2451,7 +2454,7 @@ unsafe static class Render
                     bool pale = (j + side) % 2 == 0;
                     float r0 = pale ? 0.26f : 0.07f, g0 = pale ? 0.66f : 0.30f, b0 = pale ? 0.35f : 0.15f;
                     FillSegment(buf, bw, bh, X(sx * half * 0.08f), Y(y + 0.6f), X(sx * half * 0.96f), Y(y - 4.2f),
-                                0.8f * s, r0, g0, b0, 0.65f);
+                                0.8f * u, r0, g0, b0, 0.65f);
                 }
             }
 
@@ -2465,9 +2468,9 @@ unsafe static class Render
                 float px = -bandW * 0.5f + bandW * t;
                 float edge = MathF.Abs(t - 0.5f) * 2;
                 float r = 3.5f - edge * 1.5f + MathF.Sin(t * 21f + hw) * 0.4f;
-                FillCircle(buf, bw, bh, X(px), Y(yb - r * 0.25f), (r + 0.5f) * s,
+                FillCircle(buf, bw, bh, X(px), Y(yb - r * 0.25f), (r + 0.5f) * u,
                            0.62f, 0.68f, 0.78f, 0.35f);                        // the shade under it
-                FillCircle(buf, bw, bh, X(px), Y(yb + r * 0.3f), r * s,
+                FillCircle(buf, bw, bh, X(px), Y(yb + r * 0.3f), r * u,
                            1f, 1f - 0.02f * light, 1f - 0.06f * light, 0.97f);
             }
         }
@@ -2476,8 +2479,8 @@ unsafe static class Render
         for (int i = 0; i < lightAt.Length; i += 2)
         {
             float x = lightAt[i], y = lightAt[i + 1];
-            Glow(buf, bw, bh, X(x), Y(y), 7f * s, 1f, 0.90f, 0.58f, 0.5f);
-            FillCircle(buf, bw, bh, X(x), Y(y), 1.5f * s, 1f, 0.96f, 0.80f, 1);
+            Glow(buf, bw, bh, X(x), Y(y), 7f * u, 1f, 0.90f, 0.58f, 0.5f);
+            FillCircle(buf, bw, bh, X(x), Y(y), 1.5f * u, 1f, 0.96f, 0.80f, 1);
         }
 
         // baubles, each on its little hook
@@ -2485,32 +2488,32 @@ unsafe static class Render
         {
             int c = (int)baubleAt[i + 2] * 3;
             float x = baubleAt[i], y = baubleAt[i + 1];
-            FillSegment(buf, bw, bh, X(x), Y(y + 5.6f), X(x), Y(y + 3.4f), 0.6f * s, 0.72f, 0.74f, 0.78f, 1);
-            FillCircle(buf, bw, bh, X(x), Y(y), 4.1f * s, 0.06f, 0.05f, 0.05f, 0.55f);
-            FillCircle(buf, bw, bh, X(x), Y(y), 3.5f * s, baubleColour[c], baubleColour[c + 1], baubleColour[c + 2], 1);
-            FillCircle(buf, bw, bh, X(x + 1.1f), Y(y - 1.1f), 2.1f * s,
+            FillSegment(buf, bw, bh, X(x), Y(y + 5.6f), X(x), Y(y + 3.4f), 0.6f * u, 0.72f, 0.74f, 0.78f, 1);
+            FillCircle(buf, bw, bh, X(x), Y(y), 4.1f * u, 0.06f, 0.05f, 0.05f, 0.55f);
+            FillCircle(buf, bw, bh, X(x), Y(y), 3.5f * u, baubleColour[c], baubleColour[c + 1], baubleColour[c + 2], 1);
+            FillCircle(buf, bw, bh, X(x + 1.1f), Y(y - 1.1f), 2.1f * u,
                        baubleColour[c] * 0.55f, baubleColour[c + 1] * 0.55f, baubleColour[c + 2] * 0.55f, 0.55f);
-            FillCircle(buf, bw, bh, X(x - 1.1f), Y(y + 1.2f), 1.1f * s, 1f, 1f, 1f, 0.8f);
+            FillCircle(buf, bw, bh, X(x - 1.1f), Y(y + 1.2f), 1.1f * u, 1f, 1f, 1f, 0.8f);
         }
 
         // the star on top
         float sy = treeTiers[11] + 9;
-        Glow(buf, bw, bh, X(0), Y(sy), 20f * s, 1f, 0.86f, 0.38f, 0.5f);
+        Glow(buf, bw, bh, X(0), Y(sy), 20f * u, 1f, 0.86f, 0.38f, 0.5f);
         for (int pass = 0; pass < 2; pass++)
             for (int i = 0; i < 5; i++)
             {
                 float a = -MathF.PI / 2 + i * 1.2566f;
                 float len = pass == 0 ? 10.2f : 9f;
                 FillSegment(buf, bw, bh, X(0), Y(sy), X(MathF.Cos(a) * len), Y(sy - MathF.Sin(a) * len),
-                            (pass == 0 ? 2.2f : 1.6f) * s,
+                            (pass == 0 ? 2.2f : 1.6f) * u,
                             pass == 0 ? 0.52f : 1f, pass == 0 ? 0.36f : 0.84f, pass == 0 ? 0.05f : 0.24f, 1);
             }
-        FillCircle(buf, bw, bh, X(0), Y(sy), 3.6f * s, 1f, 0.92f, 0.56f, 1);
-        FillCircle(buf, bw, bh, X(-1.1f), Y(sy + 1.1f), 1.5f * s, 1f, 1f, 0.90f, 0.9f);
+        FillCircle(buf, bw, bh, X(0), Y(sy), 3.6f * u, 1f, 0.92f, 0.56f, 1);
+        FillCircle(buf, bw, bh, X(-1.1f), Y(sy + 1.1f), 1.5f * u, 1f, 1f, 0.90f, 0.9f);
 
         // snow heaped around the foot
         for (int i = -3; i <= 3; i++)
-            FillCircle(buf, bw, bh, X(i * 6.5f), Y(1.5f - MathF.Abs(i) * 0.5f), (6.5f - MathF.Abs(i) * 1.1f) * s,
+            FillCircle(buf, bw, bh, X(i * 6.5f), Y(1.5f - MathF.Abs(i) * 0.5f), (6.5f - MathF.Abs(i) * 1.1f) * u,
                        1f, 1f - 0.02f * light, 1f - 0.06f * light, 0.95f);
     }
 
