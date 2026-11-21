@@ -1255,7 +1255,7 @@ unsafe static class Render
     {
         int px0 = Math.Max(0, (int)MathF.Floor(p.MinX * s)), px1 = Math.Min(bw - 1, (int)MathF.Ceiling((p.MinX + p.Width) * s));
 
-        float rimDepth = MathF.Max(1.4f, 1.9f * s);   // how deep the cool edge reaches, in screen pixels
+        float rimDepth = MathF.Max(2.2f, 3.0f * s);   // how deep the cool edge reaches, in screen pixels
 
         // The line the snow rests on, in screen pixels. Flat along the window's top edge and
         // curving away at the corners, so the snow wraps the corner instead of overhanging it.
@@ -1319,14 +1319,14 @@ unsafe static class Render
                 // the slope only lights the crust; deeper down every column is the same, or the
                 // differences between neighbouring columns would read as stripes
                 float m = 1 - (1 - shade) * Math.Clamp(1 - v * 2.2f, 0, 1);
-                float sr = (1 - 0.26f * t) * m, sg = (1 - 0.19f * t) * m, sb = (1 - 0.07f * t) * m;
+                float sr = (1 - 0.32f * t) * m, sg = (1 - 0.24f * t) * m, sb = (1 - 0.10f * t) * m;
                 // A cool rim along the very top. White snow on a white window is invisible: there is
                 // nothing to draw the edge, and the mound disappears. The rim belongs to the snow
                 // rather than sitting outside it, so on a dark desktop it only softens the edge
                 // while on a light one it gives the whole pile its outline.
-                float rim = Math.Clamp(1 - (y + 0.5f - top) / rimDepth, 0, 1) * 0.6f;
+                float rim = Math.Clamp(1 - (y + 0.5f - top) / rimDepth, 0, 1) * 0.95f;
                 Blend(buf + (long)y * bw + px, 0.97f * cov,
-                      sr + (0.55f - sr) * rim, sg + (0.64f - sg) * rim, sb + (0.81f - sb) * rim);
+                      sr + (0.44f - sr) * rim, sg + (0.54f - sg) * rim, sb + (0.74f - sb) * rim);
             }
         }
 
