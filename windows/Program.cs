@@ -403,7 +403,10 @@ sealed class SnowWorld
         f.WindFactor = L.Wind;
         f.Alpha = Rnd.F(L.AlphaMin, L.AlphaMax);
         f.X = Rnd.F(-40, W + 40);
-        f.Y = y ?? -Rnd.F(2, 30);
+        // Start clear of the top edge by more than the flake is wide. A flake is drawn with radius
+        // Size * 1.1, so spawning 2 px above the edge made the big near-layer ones pop into
+        // existence half on screen -- a constant flicker along the top, six times a frame.
+        f.Y = y ?? -(f.Size * 1.4f + Rnd.F(8, 70));
     }
 
     void SpawnClump(float x, float y, float vx, float vy, long sourceId)
