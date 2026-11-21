@@ -53,6 +53,9 @@ static class Cfg
     public static float Wind = 0;
     public const float WindMax = 160;              // logical px per second at full strength
 
+    // Keep the snow out of screenshots and screen recordings while leaving it on the screen
+    public static bool HideFromCapture = true;
+
     // The sky, behind your windows: stars, and Santa going over now and then
     public static bool Stars = false;              // off until you ask for them
     public static bool Santa = false;              // off until you ask for him
@@ -1321,11 +1324,11 @@ sealed class SnowWorld
 
 static class Ui
 {
-    public const int Width = 364, Height = 692;      // logical px
+    public const int Width = 364, Height = 742;      // logical px
 
     public const int None = 0, Snow = 1, Light = 2, Medium = 3, Heavy = 4,
                      Wind0 = 10,                      // Wind0 .. Wind0 + 4
-                     Balls = 20, Fairy = 21, Plough = 22, Stars = 23, SantaBy = 24,
+                     Balls = 20, Fairy = 21, Plough = 22, Stars = 23, SantaBy = 24, NoCapture = 25,
                      SendPlough = 30, Clear = 31, AutoStart = 32, Quit = 33, Close = 34, SendSanta = 35;
 
     public struct Zone { public float X0, Y0, X1, Y1; public int Id; }
@@ -1334,7 +1337,7 @@ static class Ui
     public static int Hover = None;
 
     // the live state, copied in before each paint so the drawing code stays dumb
-    public static bool SnowOn, BallsOn, FairyOn, PloughOn, StartOn, StarsOn, SantaOn;
+    public static bool SnowOn, BallsOn, FairyOn, PloughOn, StartOn, StarsOn, SantaOn, NoCaptureOn;
     public static int Amount;
     public static float Wind;
 
@@ -2386,6 +2389,8 @@ static unsafe class Program
     const uint MOD_ALT = 0x1, MOD_CONTROL = 0x2, MOD_NOREPEAT = 0x4000, VK_S = 0x53;
     const int HOTKEY_ID = 1;
     static readonly IntPtr HWND_TOPMOST = new(-1);
+    const uint WDA_NONE = 0, WDA_EXCLUDEFROMCAPTURE = 0x11;
+    static bool captureHidden;
     const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10;
     const uint WM_TRAY = WM_APP + 1;
     const int SW_HIDE = 0, SW_SHOWNOACTIVATE = 4;
@@ -2459,6 +2464,7 @@ static unsafe class Program
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int cmd);
     [DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr hWnd);
     [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
+    [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint affinity);
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")]
     static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize, IntPtr hdcSrc,
@@ -2530,6 +2536,16 @@ static unsafe class Program
         d.uFlags = NIF_TIP;
         d.szTip = paused ? "WinterIsComing — snow paused" : "WinterIsComing ❄";
         Shell_NotifyIconW(NIM_MODIFY, ref d);
+    }
+
+    /// Take a screenshot and the snow is not in it, though it is still falling on the screen.
+    /// Windows does this for us: a window with this affinity is composited to the display but left
+    /// out of every capture path — PrintScreen, the Snipping Tool, a recording, a shared screen.
+    /// Needs Windows 10 2004 or newer; on anything older the call simply fails and nothing changes.
+    static void ApplyCaptureHiding()
+    {
+        captureHidden = SetWindowDisplayAffinity(overlay, Cfg.HideFromCapture ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE)
+                        && Cfg.HideFromCapture;
     }
 
     /// Put the overlay back on top.
@@ -2620,6 +2636,7 @@ static unsafe class Program
         SetDword(key, "Lights", Cfg.Lights ? 1 : 0);
         SetDword(key, "Stars", Cfg.Stars ? 1 : 0);
         SetDword(key, "Santa", Cfg.Santa ? 1 : 0);
+        SetDword(key, "HideFromCapture", Cfg.HideFromCapture ? 1 : 0);
         SetDword(key, "AutoPlough", world != null && world.AutoPlow ? 1 : 0);
         RegCloseKey(key);
     }
@@ -2637,6 +2654,7 @@ static unsafe class Program
         Cfg.Lights = GetDword(key, "Lights", Cfg.Lights ? 1 : 0) != 0;
         Cfg.Stars = GetDword(key, "Stars", Cfg.Stars ? 1 : 0) != 0;
         Cfg.Santa = GetDword(key, "Santa", Cfg.Santa ? 1 : 0) != 0;
+        Cfg.HideFromCapture = GetDword(key, "HideFromCapture", Cfg.HideFromCapture ? 1 : 0) != 0;
         loadedAutoPlough = GetDword(key, "AutoPlough", 1) != 0;
         RegCloseKey(key);
     }
@@ -2700,6 +2718,7 @@ static unsafe class Program
         uint dpi = GetDpiForWindow(overlay);
         scale = dpi > 0 ? dpi / 96f : 1;
         CreatePanel(inst);
+        ApplyCaptureHiding();
         screenDC = GetDC(IntPtr.Zero);
         CreateSurface();
         world = new SnowWorld(bw / scale, bh / scale);
@@ -2821,6 +2840,7 @@ static unsafe class Program
             case Ui.SendSanta: world.SendSanta(); break;
             case Ui.Stars: Cfg.Stars = !Cfg.Stars; break;
             case Ui.SantaBy: Cfg.Santa = !Cfg.Santa; break;
+            case Ui.NoCapture: Cfg.HideFromCapture = !Cfg.HideFromCapture; ApplyCaptureHiding(); break;
             case Ui.Clear: world.ClearAll(); break;
             case Ui.AutoStart: SetAutoStart(!AutoStartOn()); break;
             case Ui.Close: ClosePanel(); return;
@@ -2848,6 +2868,7 @@ static unsafe class Program
         Ui.StartOn = AutoStartOn();
         Ui.StarsOn = Cfg.Stars;
         Ui.SantaOn = Cfg.Santa;
+        Ui.NoCaptureOn = Cfg.HideFromCapture;
         Ui.Amount = Cfg.TargetFlakes;
         Ui.Wind = Cfg.Wind;
 
@@ -2885,6 +2906,7 @@ static unsafe class Program
         ToggleRow("Snowplough comes by itself", Ui.PloughOn, Ui.Plough, ref y);
         ToggleRow("Stars in the sky", Ui.StarsOn, Ui.Stars, ref y);
         ToggleRow("Santa flies over", Ui.SantaOn, Ui.SantaBy, ref y);
+        ToggleRow("Keep out of screenshots", Ui.NoCaptureOn, Ui.NoCapture, ref y);
         ToggleRow("Start with Windows", Ui.StartOn, Ui.AutoStart, ref y);
 
         y += 8;
@@ -3251,7 +3273,8 @@ static unsafe class Program
             sb.Append($"wind {Cfg.Wind:0.0}, lights {(Cfg.Lights ? "on" : "off")}, snowballs {(Cfg.Snowballs ? "on" : "off")}, ")
               .Append($"stars {(Cfg.Stars ? world.Sky.Count + " showing" : "off")}, ")
               .Append($"Santa {(Cfg.Santa ? world.Santa == null ? "not over just now" : $"at x={world.Santa.X:0}" : "off")} ({Sleigh.Runs} so far), ")
-              .Append($"start with Windows {(AutoStartOn() ? "yes" : "no")}\n");
+              .Append($"start with Windows {(AutoStartOn() ? "yes" : "no")}, ")
+              .Append($"out of screenshots {(captureHidden ? "yes" : Cfg.HideFromCapture ? "ASKED FOR BUT REFUSED" : "no")}\n");
             sb.Append($"snow {(paused ? "PAUSED" : "running")}, {world.Flakes.Count} flakes in the air, ")
               .Append(overlayZ == 0
                       ? "overlay is in front of every window\n"

@@ -61,6 +61,8 @@ dotnet run -c Release
 
 **Left-click the ❄ icon** near the clock and a little panel opens with everything in it: the switch, the snow amount, the wind, snowballs, fairy lights, the snowplough and whether it starts with Windows. **Ctrl+Alt+S** stops and starts the snow from anywhere without opening anything, and right-clicking the icon still gives you the plain menu. If you can't see the ❄, it's under the **^** arrow in the tray — drag it out onto the taskbar and it stays there.
 
+**Screenshots** 📷 — the snow keeps falling on your screen but stays out of anything you capture: PrintScreen, the Snipping Tool, a recording, a shared screen. Turn *Keep out of screenshots* off in the panel if you do want it in the picture. Needs Windows 10 version 2004 or newer.
+
 Whatever you pick there is remembered for next time. Tick **Start with Windows** in the same menu and it comes back on its own after a restart (`WinterIsComing.exe --autostart on` does the same from a script, `off` undoes it). Only the pause isn't remembered — coming back to a dead desktop looks like something is broken. You'll need the [.NET 8 SDK](https://dotnet.microsoft.com/download) (`winget install Microsoft.DotNet.SDK.8`).
 
 It plays much the same way as the Mac version: **slide your mouse sideways over the snow** to roll a ball (no clicking), roll one ball into another to **push** it, **hold the left button** on a ball to carry it, and **stack three** to get a snowman with a carrot nose and a red scarf. A ball pushed off an edge falls and bursts into a heap of snow.
