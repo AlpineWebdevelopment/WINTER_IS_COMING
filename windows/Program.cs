@@ -761,12 +761,12 @@ sealed class SnowWorld
             if (MathF.Abs(mx - b.X) >= b.R + 8) continue;
             if (my <= b.Pile.TopY + 6 && my >= b.Pile.TopY - 2 * b.R - 8) return b.Pile;
         }
+        // Snowballs belong on the ground. A window's top edge is a few pixels of snow you walk
+        // the cursor over all day; balls rolled up there sat on the edge until you cleared them
+        // by hand. Dragging the window still sweeps its snow off.
         if (GroundIsTaskbar && MouseOver(Ground, mx, my)) return Ground;
         foreach (var w in Order)
-        {
-            if (Piles.TryGetValue(w.Id, out var p) && MouseOver(p, mx, my)) return p;
             if (w.Contains(mx, my)) return null;            // over a window's content
-        }
         if (!GroundIsTaskbar && MouseOver(Ground, mx, my)) return Ground;
         return null;
     }
@@ -1038,14 +1038,13 @@ sealed class SnowWorld
             {
                 b.Decor = 0;
                 b.Hidden = false;
-                float prevBottom = b.Y + b.R;
                 b.Vy += Cfg.Gravity * dt;
                 b.X += b.Vx * dt;
                 b.Y += b.Vy * dt;
                 b.Spin += b.Vx * dt / b.R;
                 if (b.Vy > 0)
                 {
-                    var p = LandingSurface(b.X, prevBottom, b.Y + b.R);
+                    var p = LandingSurface(b.X, b.Y + b.R);
                     if (p != null) { Splat(b, p); gone = true; }   // falling snowballs burst into a heap of snow
                 }
                 if (!gone && (b.Y > H + b.R * 2 || b.X < -100 || b.X > W + 100)) gone = true;
@@ -1082,24 +1081,13 @@ sealed class SnowWorld
         }
     }
 
-    /// First surface a falling ball hits between two heights: the taskbar, then window tops (front to back),
-    /// then the bottom of the screen. Returns null if it hits nothing this frame.
-    Pile LandingSurface(float x, float prevBottom, float newBottom)
+    /// Where a falling ball lands. Only the ground catches one — a ball dropped over a window
+    /// falls straight past its snow line, for the same reason you cannot roll one up there.
+    /// The ground catches everything that reaches the bottom, even where a window covers it.
+    Pile LandingSurface(float x, float newBottom)
     {
-        bool Crosses(Pile p)
-        {
-            int c = p.Col(x);
-            if (c < 0 || p.Occ[c]) return false;
-            float s = p.Surface(c);
-            return prevBottom <= s && newBottom > s;
-        }
-        if (GroundIsTaskbar && Crosses(Ground)) return Ground;
-        foreach (var w in Order)
-            if (Piles.TryGetValue(w.Id, out var p) && Crosses(p)) return p;
-        // The ground catches everything that reaches the bottom, even where a window covers it
         int gc = Ground.Col(x);
-        if (gc >= 0 && newBottom > Ground.Surface(gc)) return Ground;
-        return null;
+        return gc >= 0 && newBottom > Ground.Surface(gc) ? Ground : null;
     }
 
     /// A falling ball bursts where it lands: its snow becomes a mound on that surface, plus a puff of powder

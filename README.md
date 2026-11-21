@@ -61,7 +61,9 @@ dotnet run -c Release
 
 **Left-click the ❄ icon** near the clock to stop and start the snow, or press **Ctrl+Alt+S** from anywhere. Right-click it for the rest: the snow amount, wind, snowballs, the snowplough, fairy lights, clearing the snow and quitting. If you can't see the ❄, it's under the **^** arrow in the tray — drag it out onto the taskbar and it stays there. You'll need the [.NET 8 SDK](https://dotnet.microsoft.com/download) (`winget install Microsoft.DotNet.SDK.8`).
 
-It plays the same way as the Mac version: **slide your mouse sideways over the snow** to roll a ball (no clicking), roll one ball into another to **push** it, **hold the left button** on a ball to carry it, and **stack three** to get a snowman with a carrot nose and a red scarf. A ball pushed off an edge falls and bursts into a heap of snow. The overlay only catches your clicks while the cursor is actually over a snowball, so everything else stays clickable.
+It plays much the same way as the Mac version: **slide your mouse sideways over the snow** to roll a ball (no clicking), roll one ball into another to **push** it, **hold the left button** on a ball to carry it, and **stack three** to get a snowman with a carrot nose and a red scarf. A ball pushed off an edge falls and bursts into a heap of snow.
+
+One difference: snowballs only roll along the **bottom** of the screen. A window's top edge holds a few pixels of snow that your cursor crosses all day, and balls left sitting up there had to be cleared by hand. Drag the window instead and its snow sweeps off. The overlay only catches your clicks while the cursor is actually over a snowball, so everything else stays clickable.
 
 **Snowplough** 🚜 — send a little truck down the bottom of the screen from the ❄ menu and it scrapes the taskbar clean, shoving a growing heap of snow (and any snowball in its way) along in front of its blade. Tick *Snowplough comes by itself* and one turns up every couple of minutes.
 
