@@ -2569,28 +2569,91 @@ unsafe static class Render
         foreach (var f in w.Flakes) if (f.Clump || f.Layer == 2) Disc(buf, bw, bh, f.X * s, f.Y * s, f.Size * 1.1f * s, f.Alpha);
     }
 
-    // 32×32 tray icon: white six-armed snowflake on a blue circle (straight alpha, as icons expect)
+    // The tray icon: a six-armed dendrite — tapered arms, two pairs of side branches, a hexagonal
+    // plate at the middle — in white with a deep blue outline, so it reads on a dark taskbar and on
+    // a pale one. Drawn at the size the tray actually asks for and supersampled, so at 16 px it is
+    // crisp rather than a shrunken 32 px blur. Straight alpha, as icons expect.
     public static void TrayIcon(uint* buf, int n)
     {
+        const int SS = 8;                       // samples across one pixel, each way
         float c = n / 2f;
+        float u = n / 16f;                      // the design is drawn for 16 px and scaled from there
+        float ow = 0.62f * u;                   // how far the outline reaches past the flake
+        float L = n / 2f - ow - 0.3f;           // how far one arm reaches
+
+        // One arm, pointing along +x: x0, y0, x1, y1, half-width. The other five are this one
+        // turned 60° at a time, and each arm is mirrored about its own axis.
+        var seg = new List<float[]>();
+        void Seg(float ax, float ay, float bx, float by, float hw) => seg.Add(new[] { ax, ay, bx, by, hw });
+
+        Seg(0, 0, L * 0.52f, 0, 0.48f * u);     // the shaft, thinning towards the tip
+        Seg(L * 0.52f, 0, L * 0.84f, 0, 0.44f * u);
+        Seg(L * 0.84f, 0, L, 0, 0.34f * u);
+
+        float ca = MathF.Cos(1.15f), sa = MathF.Sin(1.15f);   // side branches lean out at ~66°
+        void Branch(float at, float len, float hw) => Seg(at, 0, at + len * ca, len * sa, hw);
+        Branch(L * 0.50f, L * 0.30f, 0.34f * u);
+        Branch(L * 0.80f, L * 0.18f, 0.27f * u);
+
+        float plate = 1.15f * u * MathF.Cos(MathF.PI / 6);     // the hexagonal plate in the middle
+
+        float Flake(float px, float py)         // distance to the flake, negative inside it
+        {
+            float best = 1e9f;
+            for (int k = 0; k < 6; k++)
+            {
+                float ang = -k * MathF.PI / 3, co = MathF.Cos(ang), si = MathF.Sin(ang);
+                float qx = px * co - py * si, qy = MathF.Abs(px * si + py * co);
+                for (int i = 0; i < seg.Count; i++)
+                {
+                    var s = seg[i];
+                    float vx = s[2] - s[0], vy = s[3] - s[1];
+                    float wx = qx - s[0], wy = qy - s[1];
+                    float t = Math.Clamp((wx * vx + wy * vy) / (vx * vx + vy * vy), 0, 1);
+                    float dx = wx - vx * t, dy = wy - vy * t;
+                    best = MathF.Min(best, MathF.Sqrt(dx * dx + dy * dy) - s[4]);
+                }
+            }
+            float hex = -1e9f;                  // flat sides between the arms
+            for (int k = 0; k < 6; k++)
+            {
+                float ang = MathF.PI / 6 + k * MathF.PI / 3;
+                hex = MathF.Max(hex, px * MathF.Cos(ang) + py * MathF.Sin(ang));
+            }
+            return MathF.Min(best, hex - plate);
+        }
+
         for (int y = 0; y < n; y++)
             for (int x = 0; x < n; x++)
             {
-                float px = x + 0.5f - c, py = y + 0.5f - c;
-                float r = MathF.Sqrt(px * px + py * py);
-                float bgA = Math.Clamp(c - 0.5f - r, 0, 1);
-                float dist = 99;
-                for (int k = 0; k < 6; k++)
-                {
-                    float ang = k * MathF.PI / 3, ex = MathF.Cos(ang), ey = MathF.Sin(ang);
-                    float tt = Math.Clamp(px * ex + py * ey, 0, c * 0.72f);
-                    float qx = px - ex * tt, qy = py - ey * tt;
-                    dist = MathF.Min(dist, MathF.Sqrt(qx * qx + qy * qy));
-                }
-                float flake = Math.Clamp(1.7f - dist, 0, 1) * bgA;
-                float rr = 0.25f + 0.75f * flake, gg = 0.47f + 0.53f * flake, bb = 0.85f + 0.15f * flake;
-                uint a = (uint)(bgA * 255);
-                buf[y * n + x] = (a << 24) | ((uint)(rr * 255) << 16) | ((uint)(gg * 255) << 8) | (uint)(bb * 255);
+                float ar = 0, ag = 0, ab = 0; int hit = 0;
+                for (int sy = 0; sy < SS; sy++)
+                    for (int sx = 0; sx < SS; sx++)
+                    {
+                        float px = x + (sx + 0.5f) / SS - c, py = y + (sy + 0.5f) / SS - c;
+                        float sd = Flake(px, py);
+                        if (sd > ow) continue;                 // past the outline there is nothing
+                        float rr, gg, bb;
+                        if (sd >= 0)                           // the outline: deep blue, darker outwards
+                        {
+                            float k = sd / ow;
+                            rr = 0.13f - 0.06f * k; gg = 0.30f - 0.15f * k; bb = 0.62f - 0.28f * k;
+                        }
+                        else                                   // the flake, white and cold underneath
+                        {
+                            float t = Math.Clamp((py + L) / (2 * L), 0, 1);
+                            rr = 1 - 0.16f * t; gg = 1 - 0.09f * t; bb = 1;
+                            float e = Math.Clamp(1 + sd / (0.45f * u), 0, 1);  // a cold edge inside the white
+                            rr += (0.72f - rr) * e * 0.22f; gg += (0.85f - gg) * e * 0.22f; bb += (0.99f - bb) * e * 0.22f;
+                        }
+                        ar += rr; ag += gg; ab += bb; hit++;
+                    }
+
+                uint a = (uint)MathF.Round(hit / (float)(SS * SS) * 255);
+                uint cr = hit == 0 ? 0 : (uint)MathF.Round(Math.Clamp(ar / hit, 0, 1) * 255);
+                uint cg = hit == 0 ? 0 : (uint)MathF.Round(Math.Clamp(ag / hit, 0, 1) * 255);
+                uint cb = hit == 0 ? 0 : (uint)MathF.Round(Math.Clamp(ab / hit, 0, 1) * 255);
+                buf[y * n + x] = (a << 24) | (cr << 16) | (cg << 8) | cb;
             }
     }
 }
@@ -3589,7 +3652,7 @@ static unsafe class Program
 
     static void AddTrayIcon()
     {
-        const int n = 32;
+        int n = Math.Max(16, (int)MathF.Round(16 * scale));   // what the tray asks for: 16 px, 20 at 125%
         var bmi = new BITMAPINFO
         {
             bmiHeader = new BITMAPINFOHEADER
