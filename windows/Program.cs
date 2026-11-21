@@ -2388,7 +2388,7 @@ unsafe static class Render
     /// only where a window hangs over the taskbar — so it is there whenever the snow is.
     public static void Tree(uint* buf, int bw, int bh, SnowWorld w, float s)
     {
-        float bx = Cfg.TreeX * w.W, by = w.Ground.TopY + 3;
+        float bx = Cfg.TreeX * w.W, by = w.Ground.TopY;
         float light = w.Ground.BgLight;
         float o = MathF.Max(0.7f, 0.5f * s);
         float k = Cfg.TreeScale, u = k * s;            // one knob for how big the whole thing is
@@ -2396,13 +2396,13 @@ unsafe static class Render
         float Y(float ly) => (by - ly * k) * s;
 
         // a shadow in the snow, so it is standing in it rather than on it
-        GradBox(buf, bw, bh, X(-30), X(30), Y(4), Y(-3), 4f * u,
+        GradBox(buf, bw, bh, X(-30), X(30), Y(6), Y(0.5f), 3f * u,
                 0.05f, 0.07f, 0.12f, 0.05f, 0.07f, 0.12f, 0.18f);
 
         // trunk, with a couple of bark lines
-        GradBox(buf, bw, bh, X(-7.5f) - o, X(7.5f) + o, Y(22) - o, Y(-1) + o, 2.5f * u + o,
+        GradBox(buf, bw, bh, X(-7.5f) - o, X(7.5f) + o, Y(22) - o, Y(1), 2.5f * u + o,
                 0.14f, 0.09f, 0.05f, 0.14f, 0.09f, 0.05f, 0.9f);
-        GradBox(buf, bw, bh, X(-7.5f), X(7.5f), Y(22), Y(-1), 2.5f * u,
+        GradBox(buf, bw, bh, X(-7.5f), X(7.5f), Y(22), Y(1.5f), 2.5f * u,
                 0.49f, 0.33f, 0.19f, 0.26f, 0.16f, 0.09f, 1);
         FillSegment(buf, bw, bh, X(-3.5f), Y(20), X(-3.5f), Y(3), 0.7f * u, 0.33f, 0.21f, 0.12f, 1);
         FillSegment(buf, bw, bh, X(2.5f), Y(18), X(2.5f), Y(2), 0.6f * u, 0.33f, 0.21f, 0.12f, 1);
@@ -2513,8 +2513,11 @@ unsafe static class Render
 
         // snow heaped around the foot
         for (int i = -3; i <= 3; i++)
-            FillCircle(buf, bw, bh, X(i * 6.5f), Y(1.5f - MathF.Abs(i) * 0.5f), (6.5f - MathF.Abs(i) * 1.1f) * u,
+        {
+            float r = 6.5f - MathF.Abs(i) * 1.1f;
+            FillCircle(buf, bw, bh, X(i * 6.5f), Y(r * 1.05f), r * u,
                        1f, 1f - 0.02f * light, 1f - 0.06f * light, 0.95f);
+        }
     }
 
     static readonly List<Snowball> drawList = new();
