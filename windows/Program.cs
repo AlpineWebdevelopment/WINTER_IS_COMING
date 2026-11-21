@@ -53,6 +53,11 @@ static class Cfg
     public static float Wind = 0;
     public const float WindMax = 160;              // logical px per second at full strength
 
+    // The sky, behind your windows: stars, and Santa going over now and then
+    public static bool Stars = true;
+    public static bool Santa = true;
+    public const float SantaEvery = 300;           // seconds between flights
+
     // Fairy lights, hung just under the top edge of every window. Off unless you ask for them.
     public static bool Lights = true;
     public const float LightSpacing = 22;          // distance between bulbs
@@ -297,6 +302,29 @@ sealed class Snowball
     }
 }
 
+// MARK: - The sky
+//
+// Stars and Santa belong to the desktop rather than to the snow: they are drawn behind every
+// window, so they only show where you can actually see your wallpaper.
+
+sealed class StarDot
+{
+    public float X, Y, R, Phase, Speed;
+}
+
+sealed class Sleigh
+{
+    public float X;             // the nose of the lead reindeer
+    public int Dir = 1;         // +1 flies right, -1 flies left
+    public float Y;             // the line it flies along
+    public float T;             // its own clock, for the bob and the legs
+
+    public const float Speed = 135;       // logical px per second
+    public const float Scale = 1.5f;
+    public const float Length = 84 * Scale;
+    public static int Runs;               // how many have flown over (diagnostics)
+}
+
 // MARK: - Snowplough
 //
 // A little truck that drives along the bottom of the screen, scraping the snow off the taskbar
@@ -348,6 +376,12 @@ sealed class SnowWorld
     public float Time => t;
     const long GroundId = -2;
 
+    // The sky
+    public readonly List<StarDot> Sky = new();
+    public Sleigh Santa;
+    public bool AutoSanta = true;
+    float santaAcc = 240;         // the first one turns up a minute in
+
     // Snowplough
     public Snowplow Plow;
     public bool AutoPlow = true;          // you asked for one that comes by itself, so it does
@@ -379,6 +413,7 @@ sealed class SnowWorld
         if (Ground != null) Release(Ground, 0, 0, GroundId);
         GroundIsTaskbar = taskbar;
         Ground = new Pile(0, top, W, taskbar ? Cfg.TaskbarPileMax : Cfg.GroundPileMax);
+        if (Sky.Count == 0) MakeStars();
     }
 
     public void ClearAll()
@@ -511,9 +546,75 @@ sealed class SnowWorld
         }
 
         StepPlow(dt);
+        StepSanta(dt);
     }
 
     // MARK: Snowplough
+
+    /// Scatter the stars, mostly across the upper half where you would look for them
+    public void MakeStars()
+    {
+        Sky.Clear();
+        int n = (int)Math.Clamp(W * H / 23000f, 12, 120);
+        for (int i = 0; i < n; i++)
+            Sky.Add(new StarDot
+            {
+                X = Rnd.F(8, W - 8),
+                Y = Rnd.F(6, H * 0.62f),
+                R = Rnd.F(1.1f, 2.4f),
+                Phase = Rnd.F(0, 6.28f),
+                Speed = Rnd.F(0.5f, 1.8f),
+            });
+    }
+
+    public void SendSanta()
+    {
+        if (Santa != null) return;
+        int dir = Rnd.F(0, 1) < 0.5f ? 1 : -1;
+        Santa = new Sleigh
+        {
+            Dir = dir,
+            X = dir > 0 ? -Sleigh.Length - 20 : W + Sleigh.Length + 20,
+            Y = Rnd.F(70, MathF.Max(90, H * 0.34f)),
+        };
+        Sleigh.Runs++;
+        santaAcc = 0;
+    }
+
+    void StepSanta(float dt)
+    {
+        if (Santa == null)
+        {
+            if (!Cfg.Santa) { santaAcc = 0; return; }
+            santaAcc += dt;
+            if (santaAcc < Cfg.SantaEvery) return;
+            // He flies across the desktop, behind the windows. With the screen covered nobody would
+            // see him go, so rather than waste the flight, wait and look again in half a minute.
+            if (SkyIsVisible()) SendSanta();
+            else santaAcc = Cfg.SantaEvery - 30;
+            return;
+        }
+        var p = Santa;
+        p.T += dt;
+        p.X += Sleigh.Speed * dt * p.Dir;
+        if ((p.Dir > 0 && p.X > W + Sleigh.Length + 40) || (p.Dir < 0 && p.X < -Sleigh.Length - 40))
+            Santa = null;
+    }
+
+    /// Is enough of the strip Santa would fly along actually showing?
+    bool SkyIsVisible()
+    {
+        int open = 0, n = 24;
+        float y = MathF.Max(90, H * 0.22f);
+        for (int i = 0; i < n; i++)
+        {
+            float x = (i + 0.5f) * W / n;
+            bool covered = false;
+            foreach (var w in Order) if (w.Contains(x, y)) { covered = true; break; }
+            if (!covered) open++;
+        }
+        return open >= n * 0.3f;
+    }
 
     public void SendPlow()
     {
@@ -1220,12 +1321,12 @@ sealed class SnowWorld
 
 static class Ui
 {
-    public const int Width = 364, Height = 584;      // logical px
+    public const int Width = 364, Height = 692;      // logical px
 
     public const int None = 0, Snow = 1, Light = 2, Medium = 3, Heavy = 4,
                      Wind0 = 10,                      // Wind0 .. Wind0 + 4
-                     Balls = 20, Fairy = 21, Plough = 22,
-                     SendPlough = 30, Clear = 31, AutoStart = 32, Quit = 33, Close = 34;
+                     Balls = 20, Fairy = 21, Plough = 22, Stars = 23, SantaBy = 24,
+                     SendPlough = 30, Clear = 31, AutoStart = 32, Quit = 33, Close = 34, SendSanta = 35;
 
     public struct Zone { public float X0, Y0, X1, Y1; public int Id; }
 
@@ -1233,7 +1334,7 @@ static class Ui
     public static int Hover = None;
 
     // the live state, copied in before each paint so the drawing code stays dumb
-    public static bool SnowOn, BallsOn, FairyOn, PloughOn, StartOn;
+    public static bool SnowOn, BallsOn, FairyOn, PloughOn, StartOn, StarsOn, SantaOn;
     public static int Amount;
     public static float Wind;
 
@@ -2011,11 +2112,203 @@ unsafe static class Render
         }
     }
 
+    // MARK: The sky: stars, and Santa going over
+
+    static uint[] hideSave = Array.Empty<uint>();
+    static readonly List<(int Y, int X0, int X1)> hideRuns = new();
+    static int hideX0, hideY0, hideX1, hideY1;
+
+    /// Everything drawn between HideBegin and HideEnd ends up behind the windows: the pixels any
+    /// window covers are put back afterwards, so only the part over bare desktop survives. Cheaper
+    /// than testing every pixel against every window — windows are rectangles, so each row of the
+    /// box is a handful of intervals.
+    static void HideBegin(uint* buf, int bw, int bh, SnowWorld w, float s, float lx0, float ly0, float lx1, float ly1)
+    {
+        hideX0 = Math.Max(0, (int)MathF.Floor(lx0 * s));
+        hideY0 = Math.Max(0, (int)MathF.Floor(ly0 * s));
+        hideX1 = Math.Min(bw - 1, (int)MathF.Ceiling(lx1 * s));
+        hideY1 = Math.Min(bh - 1, (int)MathF.Ceiling(ly1 * s));
+        hideRuns.Clear();
+        if (hideX1 < hideX0 || hideY1 < hideY0) return;
+
+        int need = 0;
+        for (int y = hideY0; y <= hideY1; y++)
+        {
+            float ly = (y + 0.5f) / s;
+            foreach (var win in w.Order)
+            {
+                if (ly < win.T || ly >= win.B) continue;
+                int a = Math.Max(hideX0, (int)MathF.Floor(win.L * s));
+                int b = Math.Min(hideX1, (int)MathF.Ceiling(win.R * s) - 1);
+                if (b < a) continue;
+                hideRuns.Add((y, a, b));
+                need += b - a + 1;
+            }
+        }
+        if (need == 0) return;
+        if (hideSave.Length < need) hideSave = new uint[need];
+        int at = 0;
+        foreach (var (y, a, b) in hideRuns)
+            for (int x = a; x <= b; x++) hideSave[at++] = buf[(long)y * bw + x];
+    }
+
+    static void HideEnd(uint* buf, int bw)
+    {
+        int at = 0;
+        foreach (var (y, a, b) in hideRuns)
+            for (int x = a; x <= b; x++) buf[(long)y * bw + x] = hideSave[at++];
+        hideRuns.Clear();
+    }
+
+    /// Stars, twinkling out of step with each other. One hit test per star is enough — they are
+    /// small, so a star half behind a window edge can simply not be there.
+    public static void Sky(uint* buf, int bw, int bh, SnowWorld w, float s)
+    {
+        float t = w.Time;
+        foreach (var st in w.Sky)
+        {
+            bool hidden = false;
+            foreach (var win in w.Order)
+                if (win.Contains(st.X, st.Y)) { hidden = true; break; }
+            if (hidden) continue;
+
+            float k = 0.45f + 0.55f * (0.5f + 0.5f * MathF.Sin(t * st.Speed + st.Phase));
+            float r = st.R * s;
+            Glow(buf, bw, bh, st.X * s, st.Y * s, r * 4.5f, 1f, 0.96f, 0.82f, 0.30f * k);
+            FillSegment(buf, bw, bh, (st.X - st.R * 2.1f) * s, st.Y * s, (st.X + st.R * 2.1f) * s, st.Y * s,
+                        MathF.Max(0.5f, r * 0.26f), 1f, 0.99f, 0.92f, 0.75f * k);
+            FillSegment(buf, bw, bh, st.X * s, (st.Y - st.R * 2.1f) * s, st.X * s, (st.Y + st.R * 2.1f) * s,
+                        MathF.Max(0.5f, r * 0.26f), 1f, 0.99f, 0.92f, 0.75f * k);
+            FillCircle(buf, bw, bh, st.X * s, st.Y * s, MathF.Max(0.7f, r * 0.62f), 1f, 1f, 0.97f, k);
+        }
+    }
+
+    /// Santa, his sleigh and two reindeer. Local units: x 0 is the lead reindeer's nose and runs
+    /// backwards, y 0 is the line they fly along.
+    public static void Santa(uint* buf, int bw, int bh, Sleigh p, float s)
+    {
+        float d = p.Dir, k = Sleigh.Scale * s;
+        float bob = MathF.Sin(p.T * 1.9f) * 4f;
+        float gy = (p.Y + bob) * s;
+        float SX(float lx) => p.X * s + d * lx * k;
+        float SY(float ly) => gy + ly * k;
+        float o = MathF.Max(0.7f, 0.5f * k);
+
+        void Reindeer(float at, float phase, bool lead)
+        {
+            float step = MathF.Sin(p.T * 7f + phase);
+            // legs first, so the body covers their tops
+            for (int i = 0; i < 4; i++)
+            {
+                float hipX = at - (i < 2 ? 3.5f : 13.5f);
+                float swing = MathF.Sin(p.T * 7f + phase + i * 1.6f) * 3.2f;
+                FillSegment(buf, bw, bh, SX(hipX), SY(-3.5f), SX(hipX + swing), SY(3.2f),
+                            1.05f * k, 0.38f, 0.26f, 0.17f, 1);
+            }
+            // body and neck
+            GradBox(buf, bw, bh, SX(at - 16.5f), SX(at - 1.5f), SY(-8.5f), SY(-2.5f), 2.8f * k,
+                    0.56f, 0.39f, 0.25f, 0.40f, 0.27f, 0.17f, 1);
+            FillSegment(buf, bw, bh, SX(at - 3.5f), SY(-6.5f), SX(at + 1.5f), SY(-11.5f), 2.1f * k,
+                        0.54f, 0.38f, 0.24f, 1);
+            // tail
+            FillCircle(buf, bw, bh, SX(at - 17f), SY(-7.5f), 1.6f * k, 0.72f, 0.60f, 0.46f, 1);
+            // head
+            FillCircle(buf, bw, bh, SX(at + 2.2f), SY(-12.5f), 3.1f * k, 0.56f, 0.39f, 0.25f, 1);
+            FillCircle(buf, bw, bh, SX(at + 4.6f), SY(-11.6f), 1.9f * k, 0.62f, 0.45f, 0.30f, 1);
+            FillCircle(buf, bw, bh, SX(at + 1.3f), SY(-13.6f), 0.55f * k, 0.12f, 0.09f, 0.07f, 1);
+            // antlers
+            for (int side = 0; side < 2; side++)
+            {
+                float sx = side == 0 ? 0.4f : 2.0f;
+                FillSegment(buf, bw, bh, SX(at + sx), SY(-14.6f), SX(at + sx - 1.6f), SY(-19.4f),
+                            0.6f * k, 0.46f, 0.33f, 0.21f, 1);
+                FillSegment(buf, bw, bh, SX(at + sx - 0.9f), SY(-17.2f), SX(at + sx - 3.2f), SY(-18.6f),
+                            0.5f * k, 0.46f, 0.33f, 0.21f, 1);
+                FillSegment(buf, bw, bh, SX(at + sx - 1.6f), SY(-19.4f), SX(at + sx - 3.0f), SY(-21.6f),
+                            0.5f * k, 0.46f, 0.33f, 0.21f, 1);
+            }
+            // and the one up front gets the nose
+            if (lead)
+            {
+                Glow(buf, bw, bh, SX(at + 5.8f), SY(-11.3f), 5.5f * k, 1f, 0.25f, 0.20f, 0.55f);
+                FillCircle(buf, bw, bh, SX(at + 5.8f), SY(-11.3f), 1.5f * k, 1f, 0.26f, 0.22f, 1);
+                FillCircle(buf, bw, bh, SX(at + 5.4f), SY(-11.7f), 0.6f * k, 1f, 0.72f, 0.68f, 1);
+            }
+            _ = step;
+        }
+
+        // reins, drawn under everything
+        FillSegment(buf, bw, bh, SX(-1f), SY(-9.5f), SX(-26f), SY(-9.5f), 0.45f * k, 0.30f, 0.21f, 0.14f, 0.9f);
+        FillSegment(buf, bw, bh, SX(-26f), SY(-9.5f), SX(-52f), SY(-7.5f), 0.45f * k, 0.30f, 0.21f, 0.14f, 0.9f);
+
+        Reindeer(0, 0, true);
+        Reindeer(-25f, 1.9f, false);
+
+        // the sleigh: a runner that curls up at the back, a red body, Santa and the sack
+        pvx[0] = SX(-52f); pvy[0] = SY(-2.2f);
+        pvx[1] = SX(-57f); pvy[1] = SY(-9f);
+        pvx[2] = SX(-78f); pvy[2] = SY(-9f);
+        pvx[3] = SX(-74f); pvy[3] = SY(-2.2f);
+        GradPoly(buf, bw, bh, pvx, pvy, 4, 2.2f * k + o, 0.26f, 0.05f, 0.07f, 0.26f, 0.05f, 0.07f, 0.9f);
+        GradPoly(buf, bw, bh, pvx, pvy, 4, 2.2f * k, 0.86f, 0.17f, 0.19f, 0.58f, 0.08f, 0.11f, 1);
+        GradBox(buf, bw, bh, SX(-77f), SX(-53f), SY(-6.6f), SY(-5.2f), 0.6f * k,
+                0.95f, 0.78f, 0.28f, 0.80f, 0.60f, 0.16f, 1);                    // gold trim
+        FillSegment(buf, bw, bh, SX(-50f), SY(-1.2f), SX(-79f), SY(-1.2f), 0.8f * k, 0.80f, 0.84f, 0.90f, 1);
+        FillSegment(buf, bw, bh, SX(-79f), SY(-1.2f), SX(-82f), SY(-5.5f), 0.8f * k, 0.80f, 0.84f, 0.90f, 1);
+
+        // the sack at the back
+        FillCircle(buf, bw, bh, SX(-71f), SY(-13f), 5.2f * k, 0.46f, 0.33f, 0.20f, 1);
+        FillCircle(buf, bw, bh, SX(-67.5f), SY(-16f), 2.4f * k, 0.86f, 0.20f, 0.24f, 1);
+        FillCircle(buf, bw, bh, SX(-73.5f), SY(-16.6f), 2.1f * k, 0.25f, 0.55f, 0.85f, 1);
+
+        // Santa
+        GradBox(buf, bw, bh, SX(-64f), SX(-56.5f), SY(-16.5f), SY(-7f), 3f * k,
+                0.90f, 0.20f, 0.22f, 0.66f, 0.10f, 0.13f, 1);                     // coat
+        GradBox(buf, bw, bh, SX(-64.5f), SX(-56f), SY(-10.5f), SY(-9f), 0.6f * k,
+                0.16f, 0.14f, 0.16f, 0.16f, 0.14f, 0.16f, 1);                     // belt
+        FillSegment(buf, bw, bh, SX(-57.5f), SY(-14.5f), SX(-51.5f), SY(-11f), 1.5f * k, 0.90f, 0.20f, 0.22f, 1);
+        FillCircle(buf, bw, bh, SX(-60f), SY(-18.5f), 3.4f * k, 1f, 0.86f, 0.74f, 1);   // face
+        FillCircle(buf, bw, bh, SX(-61.4f), SY(-17.2f), 2.6f * k, 0.97f, 0.97f, 0.99f, 1);  // beard
+        FillCircle(buf, bw, bh, SX(-58.8f), SY(-19.4f), 0.55f * k, 0.15f, 0.11f, 0.10f, 1); // eye
+        GradBox(buf, bw, bh, SX(-63.6f), SX(-56.6f), SY(-21.6f), SY(-20.2f), 0.7f * k,
+                0.98f, 0.98f, 1f, 0.90f, 0.92f, 0.96f, 1);                        // hat brim
+        pvx[0] = SX(-63f); pvy[0] = SY(-21.4f);
+        pvx[1] = SX(-57.4f); pvy[1] = SY(-21.4f);
+        pvx[2] = SX(-64.5f); pvy[2] = SY(-26.5f);
+        GradPoly(buf, bw, bh, pvx, pvy, 3, 1.4f * k, 0.90f, 0.20f, 0.22f, 0.72f, 0.12f, 0.15f, 1);
+        FillCircle(buf, bw, bh, SX(-65.2f), SY(-27f), 1.9f * k, 1f, 1f, 1f, 1);   // bobble
+
+        // a little sparkle trail
+        for (int i = 0; i < 5; i++)
+        {
+            float a = p.T * 2.3f + i * 1.3f;
+            float fade = 0.42f - i * 0.07f;
+            Glow(buf, bw, bh, SX(-86f - i * 11f), SY(-6f + MathF.Sin(a) * 3.5f), (3.2f + i * 0.7f) * k,
+                 1f, 0.95f, 0.78f, MathF.Max(0, fade));
+        }
+    }
+
     static readonly List<Snowball> drawList = new();
 
     public static void World(uint* buf, int bw, int bh, SnowWorld w, float s)
     {
         new Span<uint>(buf, bw * bh).Clear();
+
+        // the sky first: stars and Santa live on the desktop, behind every window
+        if (Cfg.Stars && w.Sky.Count > 0)
+        {
+            Sky(buf, bw, bh, w, s);
+        }
+        if (w.Santa != null)
+        {
+            var sl = w.Santa;
+            float back = sl.X - sl.Dir * (Sleigh.Length + 70);
+            HideBegin(buf, bw, bh, w, s, MathF.Min(sl.X, back) - 30, sl.Y - 50,
+                      MathF.Max(sl.X, back) + 30, sl.Y + 16);
+            Santa(buf, bw, bh, sl, s);
+            HideEnd(buf, bw);
+        }
+
         // far + middle flakes, then piles, then snowballs, then near flakes and clumps on top
         foreach (var f in w.Flakes) if (!f.Clump && f.Layer < 2) Disc(buf, bw, bh, f.X * s, f.Y * s, f.Size * 1.1f * s, f.Alpha);
         foreach (var p in w.Piles.Values) Pile(buf, bw, bh, p, s);
@@ -2316,6 +2609,8 @@ static unsafe class Program
         SetDword(key, "Wind", (int)MathF.Round(Cfg.Wind * 100));
         SetDword(key, "Snowballs", Cfg.Snowballs ? 1 : 0);
         SetDword(key, "Lights", Cfg.Lights ? 1 : 0);
+        SetDword(key, "Stars", Cfg.Stars ? 1 : 0);
+        SetDword(key, "Santa", Cfg.Santa ? 1 : 0);
         SetDword(key, "AutoPlough", world != null && world.AutoPlow ? 1 : 0);
         RegCloseKey(key);
     }
@@ -2331,6 +2626,8 @@ static unsafe class Program
         Cfg.Wind = Math.Clamp(GetDword(key, "Wind", 0) / 100f, -1f, 1f);
         Cfg.Snowballs = GetDword(key, "Snowballs", Cfg.Snowballs ? 1 : 0) != 0;
         Cfg.Lights = GetDword(key, "Lights", Cfg.Lights ? 1 : 0) != 0;
+        Cfg.Stars = GetDword(key, "Stars", Cfg.Stars ? 1 : 0) != 0;
+        Cfg.Santa = GetDword(key, "Santa", Cfg.Santa ? 1 : 0) != 0;
         loadedAutoPlough = GetDword(key, "AutoPlough", 1) != 0;
         RegCloseKey(key);
     }
@@ -2512,6 +2809,9 @@ static unsafe class Program
             case Ui.Fairy: Cfg.Lights = !Cfg.Lights; break;
             case Ui.Plough: world.AutoPlow = !world.AutoPlow; break;
             case Ui.SendPlough: world.SendPlow(); break;
+            case Ui.SendSanta: world.SendSanta(); break;
+            case Ui.Stars: Cfg.Stars = !Cfg.Stars; break;
+            case Ui.SantaBy: Cfg.Santa = !Cfg.Santa; break;
             case Ui.Clear: world.ClearAll(); break;
             case Ui.AutoStart: SetAutoStart(!AutoStartOn()); break;
             case Ui.Close: ClosePanel(); return;
@@ -2537,6 +2837,8 @@ static unsafe class Program
         Ui.FairyOn = Cfg.Lights;
         Ui.PloughOn = world != null && world.AutoPlow;
         Ui.StartOn = AutoStartOn();
+        Ui.StarsOn = Cfg.Stars;
+        Ui.SantaOn = Cfg.Santa;
         Ui.Amount = Cfg.TargetFlakes;
         Ui.Wind = Cfg.Wind;
 
@@ -2572,13 +2874,16 @@ static unsafe class Program
         ToggleRow("Snowballs and snowmen", Ui.BallsOn, Ui.Balls, ref y);
         ToggleRow("Fairy lights", Ui.FairyOn, Ui.Fairy, ref y);
         ToggleRow("Snowplough comes by itself", Ui.PloughOn, Ui.Plough, ref y);
+        ToggleRow("Stars in the sky", Ui.StarsOn, Ui.Stars, ref y);
+        ToggleRow("Santa flies over", Ui.SantaOn, Ui.SantaBy, ref y);
         ToggleRow("Start with Windows", Ui.StartOn, Ui.AutoStart, ref y);
 
         y += 8;
         Button("Send the snowplough", 14, y, Ui.Width / 2f - 4, y + 34, Ui.SendPlough);
-        Button("Clear the snow", Ui.Width / 2f + 4, y, Ui.Width - 14, y + 34, Ui.Clear);
+        Button("Send Santa over", Ui.Width / 2f + 4, y, Ui.Width - 14, y + 34, Ui.SendSanta);
         y += 44;
-        Button("Quit", Ui.Width - 94, y, Ui.Width - 14, y + 30, Ui.Quit);
+        Button("Clear the snow", 14, y, Ui.Width / 2f - 4, y + 34, Ui.Clear);
+        Button("Quit", Ui.Width / 2f + 4, y, Ui.Width - 14, y + 34, Ui.Quit);
 
         GdiFlush();
     }
@@ -2935,6 +3240,7 @@ static unsafe class Program
             }
             sb.Append($"piles rebuilt {world.PileChurn}, shaken off by a moving window {world.MoveShakes}\n");
             sb.Append($"wind {Cfg.Wind:0.0}, lights {(Cfg.Lights ? "on" : "off")}, snowballs {(Cfg.Snowballs ? "on" : "off")}, ")
+              .Append($"stars {world.Sky.Count}, Santa {(world.Santa == null ? "not over" : $"at x={world.Santa.X:0}")} ({Sleigh.Runs} so far), ")
               .Append($"start with Windows {(AutoStartOn() ? "yes" : "no")}\n");
             sb.Append($"snow {(paused ? "PAUSED" : "running")}, {world.Flakes.Count} flakes in the air, ")
               .Append(overlayZ == 0

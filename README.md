@@ -71,6 +71,8 @@ One difference: snowballs only roll along the **bottom** of the screen. A window
 
 A note on **maximised windows**, which are far more common on Windows than on a Mac. The snow sits *above* a window's top edge, so a maximised window has no room for it and simply gets no snow line — better than a white band pinned to the edge of the screen. The windows in front of it still get theirs: because a maximised window catches every flake falling behind it, some of the flakes that fall *in front* of the windows settle on the frontmost window covering them instead. So every window you can actually see collects snow on its own top edge, and the line follows the window when you move it.
 
+**Santa and the stars** ⭐ — stars twinkle in the sky and Santa flies over with his sleigh and two reindeer every few minutes, the one in front with a nose you can see coming. Both belong to the desktop rather than to the snow: they show where your wallpaper shows and disappear behind your windows, so if the screen is covered Santa waits for a gap rather than going past unseen. *Send Santa over* in the panel sends him whenever you like.
+
 **Wind** 🌬️ — the snow always drifts in gentle gusts, and the ❄ menu has a *Wind* submenu if you want a steady breeze or a proper gale behind it, from either side. The stronger you set it, the rougher the gusts get, and it tugs at the fairy lights too.
 
 **Fairy lights** ✨ — now on Windows as well, and on from the start: a string of small bulbs hangs itself just under the top edge of every window, drooping between its hooks, lighting up left to right, twinkling out of step with each other and swinging in the wind. They follow the windows you move, and tuck away behind anything in front. The ❄ menu switches them off again.
