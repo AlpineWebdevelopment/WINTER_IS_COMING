@@ -351,8 +351,8 @@ sealed class SnowWorld
     // Snowplough
     public Snowplow Plow;
     public bool AutoPlow = true;          // you asked for one that comes by itself, so it does
-    public float AutoPlowEvery = 180;     // seconds between automatic runs
-    float plowAcc = 135;                  // but the first turns up sooner, so you get to see one
+    public float AutoPlowEvery = 420;     // seconds between automatic runs
+    float plowAcc = 300;                  // but the first turns up sooner, so you get to see one
 
     // Snowballs
     public readonly List<Snowball> Balls = new();
