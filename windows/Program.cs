@@ -98,6 +98,7 @@ sealed class Pile
     public readonly float[] Drop;     // how far below TopY this column rests: the window's rounded corner
     public readonly bool[] Occ;       // column hidden behind a window in front
     public readonly float Seed;       // so two piles never get the same lumps
+    public float BgLight;             // 0 = dark behind this pile, 1 = light; the host samples it
     public bool Dirty;
 
     static int seedCounter;
@@ -1319,14 +1320,14 @@ unsafe static class Render
                 // the slope only lights the crust; deeper down every column is the same, or the
                 // differences between neighbouring columns would read as stripes
                 float m = 1 - (1 - shade) * Math.Clamp(1 - v * 2.2f, 0, 1);
-                float sr = (1 - 0.32f * t) * m, sg = (1 - 0.24f * t) * m, sb = (1 - 0.10f * t) * m;
-                // A cool rim along the very top. White snow on a white window is invisible: there is
-                // nothing to draw the edge, and the mound disappears. The rim belongs to the snow
-                // rather than sitting outside it, so on a dark desktop it only softens the edge
-                // while on a light one it gives the whole pile its outline.
-                float rim = Math.Clamp(1 - (y + 0.5f - top) / rimDepth, 0, 1) * 0.95f;
+                float sr = (1 - 0.26f * t) * m, sg = (1 - 0.19f * t) * m, sb = (1 - 0.07f * t) * m;
+                // A cool rim along the very top, but only where it is needed. White snow on a white
+                // window is invisible — nothing draws the edge and the mound disappears — while on a
+                // dark desktop the snow should stay plain white. So the host samples what is behind
+                // each pile and sets BgLight, and the rim fades in only over a light background.
+                float rim = Math.Clamp(1 - (y + 0.5f - top) / rimDepth, 0, 1) * 0.95f * p.BgLight;
                 Blend(buf + (long)y * bw + px, 0.97f * cov,
-                      sr + (0.44f - sr) * rim, sg + (0.54f - sg) * rim, sb + (0.74f - sb) * rim);
+                      sr + (0.46f - sr) * rim, sg + (0.56f - sg) * rim, sb + (0.76f - sb) * rim);
             }
         }
 
@@ -2035,6 +2036,7 @@ static unsafe class Program
     const uint WS_EX_LAYERED = 0x80000, WS_EX_TRANSPARENT = 0x20, WS_EX_TOPMOST = 0x8,
                WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
     const int GWL_EXSTYLE = -20;
+    const uint SRCCOPY = 0x00CC0020;
     const uint WM_DESTROY = 0x2, WM_TIMER = 0x113, WM_DISPLAYCHANGE = 0x7E, WM_NULL = 0,
                WM_APP = 0x8000, WM_MOUSEMOVE = 0x200, WM_LBUTTONDOWN = 0x201, WM_LBUTTONUP = 0x202,
                WM_RBUTTONUP = 0x205, WM_CAPTURECHANGED = 0x215, WM_HOTKEY = 0x312;
@@ -2145,6 +2147,7 @@ static unsafe class Program
     [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFO bmi, uint usage, out IntPtr bits, IntPtr section, uint offset);
     [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
     [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
+    [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
     [DllImport("gdi32.dll")] static extern IntPtr CreateBitmap(int w, int h, uint planes, uint bpp, IntPtr bits);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out RECT value, int size);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size);
@@ -2259,6 +2262,68 @@ static unsafe class Program
         }
     }
 
+    // MARK: Reading the background behind the snow
+    //
+    // White snow on a white page is invisible, so the piles get an outline — but only there. The
+    // overlay cannot ask the compositor what is underneath it, so instead it reads one row of the
+    // screen from above each pile, where it draws nothing but the odd falling flake, and takes the
+    // median brightness. The median is what makes a flake or two in the way harmless.
+
+    static IntPtr sampleDC, sampleDib, sampleBits;
+    static int sampleW;
+    static readonly float[] sampleLum = new float[17];
+    static double lastSample;
+
+    static void CreateSampler()
+    {
+        if (sampleDC == IntPtr.Zero) sampleDC = CreateCompatibleDC(IntPtr.Zero);
+        if (sampleDib != IntPtr.Zero) DeleteObject(sampleDib);
+        sampleW = Math.Max(1, bw);
+        var bmi = new BITMAPINFO
+        {
+            bmiHeader = new BITMAPINFOHEADER
+            {
+                biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
+                biWidth = sampleW, biHeight = -1, biPlanes = 1, biBitCount = 32, biCompression = 0,
+            }
+        };
+        sampleDib = CreateDIBSection(sampleDC, ref bmi, 0, out sampleBits, IntPtr.Zero, 0);
+        SelectObject(sampleDC, sampleDib);
+    }
+
+    /// 0 when it is dark behind this pile, 1 when it is light. Returns the pile's current value
+    /// unchanged if the strip cannot be read.
+    static float BackgroundBehind(Pile p)
+    {
+        if (sampleBits == IntPtr.Zero) return p.BgLight;
+        int y = (int)((p.TopY - p.MaxH - 10) * scale);
+        if (y < 0) y = 0;
+        if (y >= bh) return p.BgLight;
+        int x0 = Math.Max(0, (int)(p.MinX * scale));
+        int x1 = Math.Min(bw - 1, (int)((p.MinX + p.Width) * scale));
+        int w = x1 - x0 + 1;
+        if (w < 8) return p.BgLight;
+        if (!BitBlt(sampleDC, 0, 0, w, 1, screenDC, x0, y, SRCCOPY)) return p.BgLight;
+
+        uint* row = (uint*)sampleBits;
+        int n = sampleLum.Length;
+        for (int i = 0; i < n; i++)
+        {
+            uint c = row[(int)((i + 0.5f) * w / n)];
+            sampleLum[i] = (((c >> 16) & 0xFF) * 0.30f + ((c >> 8) & 0xFF) * 0.59f + (c & 0xFF) * 0.11f) / 255f;
+        }
+        Array.Sort(sampleLum);
+        float median = sampleLum[n / 2];
+        return Math.Clamp((median - 0.45f) / 0.22f, 0, 1);
+    }
+
+    static void SampleBackgrounds()
+    {
+        foreach (var pile in world.Piles.Values)
+            pile.BgLight += (BackgroundBehind(pile) - pile.BgLight) * 0.4f;
+        world.Ground.BgLight += (BackgroundBehind(world.Ground) - world.Ground.BgLight) * 0.4f;
+    }
+
     static void CreateSurface()
     {
         if (memDC == IntPtr.Zero) memDC = CreateCompatibleDC(IntPtr.Zero);
@@ -2274,6 +2339,7 @@ static unsafe class Program
         };
         dib = CreateDIBSection(memDC, ref bmi, 0, out bits, IntPtr.Zero, 0);
         SelectObject(memDC, dib);
+        CreateSampler();
     }
 
     static IntPtr WndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
@@ -2356,6 +2422,8 @@ static unsafe class Program
         var blend = new BLENDFUNCTION { BlendOp = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };   // AC_SRC_ALPHA
         UpdateLayeredWindow(overlay, screenDC, ref dst, ref size, memDC, ref src, 0, ref blend, ULW_ALPHA);
 
+        if (now - lastSample > 0.35) { lastSample = now; SampleBackgrounds(); }
+
         topAcc += dt;
         if (topAcc >= 1) { topAcc = 0; KeepOnTop(false); }
 
@@ -2405,7 +2473,8 @@ static unsafe class Program
             var sb = new StringBuilder();
             sb.Append("WinterIsComing state at ").Append(DateTime.Now.ToString("HH:mm:ss")).Append('\n');
             sb.Append($"screen {bw}x{bh} physical, dpi scale {scale:0.00}, world {world.W:0}x{world.H:0} logical\n");
-            sb.Append($"ground: topY {world.Ground.TopY:0}  onTaskbar {world.GroundIsTaskbar}  taskbarZ {world.TaskbarZ}  ");
+            sb.Append($"ground: topY {world.Ground.TopY:0}  onTaskbar {world.GroundIsTaskbar}  taskbarZ {world.TaskbarZ}  ")
+              .Append($"bgLight {world.Ground.BgLight:0.00}  ");
             int occ = 0, cols = world.Ground.Count;
             float deepest = 0;
             for (int c = 0; c < cols; c++) { if (world.Ground.Occ[c]) occ++; deepest = MathF.Max(deepest, world.Ground.H[c]); }
@@ -2416,7 +2485,7 @@ static unsafe class Program
                 var w = world.Order[i];
                 bool overTaskbar = world.GroundIsTaskbar && w.B > world.Ground.TopY + 1;
                 string pile = world.Piles.TryGetValue(w.Id, out var p)
-                    ? $"snow line y={p.TopY:0} cap {p.MaxH:0} deepest {Deepest(p):0.0}"
+                    ? $"snow line y={p.TopY:0} cap {p.MaxH:0} deepest {Deepest(p):0.0} bgLight {p.BgLight:0.00}"
                     : "no snow line (no room above its top edge)";
                 sb.Append($"  [{i}] x {w.L:0}..{w.R:0}  y {w.T:0}..{w.B:0}  ")
                   .Append(i < world.TaskbarZ ? "in front of taskbar" : "behind taskbar")
