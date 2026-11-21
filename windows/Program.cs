@@ -43,6 +43,20 @@ static class Cfg
     public const float BallMax = 28;               // and stops growing at this size
     public const int MaxBalls = 20;                // oldest resting snowballs are removed beyond this
     public static bool Snowballs = true;           // rolling snowballs and snowmen on / off
+
+    // Wind. The ambient gusts are always there; this is the steady breeze on top of them, from
+    // -1 (hard from the right) through 0 (calm) to +1 (hard from the left).
+    public static float Wind = 0;
+    public const float WindMax = 160;              // logical px per second at full strength
+
+    // Fairy lights, hung just under the top edge of every window. Off until you ask for them.
+    public static bool Lights = false;
+    public const float LightSpacing = 22;          // distance between bulbs
+    public const float LightSpan = 120;            // distance between the points the wire is hooked at
+    public const float LightSag = 9;               // how far the wire droops between hooks
+    public const float LightInset = 14;            // keep clear of the window's rounded corners
+    public const float BulbGlow = 19;              // size of a bulb's soft glow
+    public const float BulbCore = 5.5f;            // size of a bulb's bright centre
 }
 
 // Three depth layers: far = small, faint, slow; near = big, bright, fast
@@ -150,6 +164,76 @@ sealed class Pile
     public void Clear() { Array.Clear(H); Dirty = true; }
 }
 
+// MARK: - Fairy lights
+//
+// A string of bulbs hanging just under the top edge of one window, ported from the macOS version.
+// The wire droops between hooks, the bulbs twinkle out of step with each other, the whole string
+// bounces for a moment after it is hung, and the wind swings it sideways.
+
+sealed class LightString
+{
+    public struct Bulb { public float Phase, Speed; public int Colour; }
+
+    // red, amber, green, blue, pink
+    public static readonly float[] Colours =
+    {
+        1.00f, 0.10f, 0.12f,
+        1.00f, 0.62f, 0.00f,
+        0.05f, 0.95f, 0.20f,
+        0.10f, 0.42f, 1.00f,
+        1.00f, 0.15f, 0.62f,
+    };
+
+    public float L, T, Width;     // the window edge it hangs from
+    public float HungAt;
+    public Bulb[] Bulbs = Array.Empty<Bulb>();
+
+    const float SwingTime = 1.4f;
+
+    /// Follow the window. New bulbs are only made when the window's width changes, so the string
+    /// doesn't re-hang itself every time you nudge the window.
+    public void Place(float l, float t, float width, float now)
+    {
+        L = l; T = t; Width = width;
+        float w = MathF.Max(0, width - 2 * Cfg.LightInset);
+        int count = Math.Max(2, (int)(w / Cfg.LightSpacing));
+        if (Bulbs.Length == count) return;
+        Bulbs = new Bulb[count];
+        for (int i = 0; i < count; i++)
+            Bulbs[i] = new Bulb { Phase = Rnd.F(0, 6.28f), Speed = Rnd.F(1.2f, 3.0f), Colour = i % 5 };
+        HungAt = now;
+    }
+
+    // Just after being hung the string bounces and the bulbs swing, then settle: a damped wobble.
+    public float Swing(float t)
+    {
+        float tau = t - HungAt;
+        return tau >= SwingTime ? 0 : 0.9f * MathF.Exp(-4 * tau) * MathF.Sin(13 * tau);
+    }
+
+    public float Sway(float t)
+    {
+        float tau = t - HungAt;
+        return tau >= SwingTime ? 0 : 3.5f * MathF.Exp(-4 * tau) * MathF.Sin(9.5f * tau);
+    }
+
+    /// The bulbs light up one after another, left to right, as the string goes up
+    public float Reveal(int i, float t) => Math.Clamp((t - HungAt - i * 0.015f) / 0.08f, 0, 1);
+
+    /// Height of the wire at x: it droops between hooks like a real string of lights
+    public float WireY(float x, float swing)
+    {
+        float x0 = L + Cfg.LightInset;
+        float w = MathF.Max(1, Width - 2 * Cfg.LightInset);
+        float span = w / MathF.Max(1, MathF.Round(w / Cfg.LightSpan));
+        float r = (x - x0) / span;
+        float f = r <= 0 ? 0 : MathF.Min(1, r - MathF.Floor(r));
+        return T + 3 + Cfg.LightSag * (1 + swing) * MathF.Sin(MathF.PI * f);
+    }
+
+    public float BulbX(int i) => L + Cfg.LightInset + (i + 0.5f) * MathF.Max(0, Width - 2 * Cfg.LightInset) / Bulbs.Length;
+}
+
 // MARK: - Snowball
 //
 // Rolled out of the snow by sliding the mouse sideways over a pile. Three stacked balls become a snowman.
@@ -234,7 +318,9 @@ sealed class SnowWorld
     public Pile Ground;
     public bool GroundIsTaskbar;
     public int TaskbarZ;             // windows before this index in Order are drawn in front of the taskbar
+    public readonly Dictionary<long, LightString> Lights = new();
     float pollAcc, t;
+    public float Time => t;
     const long GroundId = -2;
 
     // Snowplough
@@ -511,6 +597,23 @@ sealed class SnowWorld
         }
         Order = wins;
 
+        // Fairy lights follow the windows they hang on
+        if (!Cfg.Lights) Lights.Clear();
+        else
+        {
+            foreach (var r in wins)
+            {
+                if (!Lights.TryGetValue(r.Id, out var ls)) Lights[r.Id] = ls = new LightString { HungAt = t };
+                ls.Place(r.L, r.T, r.Width, t);
+            }
+            if (Lights.Count > wins.Count)
+            {
+                var dead = new List<long>();
+                foreach (var kv in Lights) if (!alive.Contains(kv.Key)) dead.Add(kv.Key);
+                foreach (var id in dead) Lights.Remove(id);
+            }
+        }
+
         ComputeOcclusion();
         foreach (var p in Piles.Values) p.Relax();
         Ground.Relax();
@@ -552,8 +655,10 @@ sealed class SnowWorld
 
     void StepFlakes(float dt)
     {
-        // A few sines at different frequencies add up to gusty wind
-        float wind = 14 * MathF.Sin(t * 0.11f) + 9 * MathF.Sin(t * 0.37f + 1.3f) + 6 * MathF.Sin(t * 0.9f + 0.4f);
+        // A few sines at different frequencies add up to gusty wind. The steady breeze you pick in
+        // the menu rides on top, and makes the gusts rougher as it gets stronger.
+        float gust = 14 * MathF.Sin(t * 0.11f) + 9 * MathF.Sin(t * 0.37f + 1.3f) + 6 * MathF.Sin(t * 0.9f + 0.4f);
+        float wind = gust * (1 + MathF.Abs(Cfg.Wind)) + Cfg.Wind * Cfg.WindMax;
         int normal = 0;
         for (int i = Flakes.Count - 1; i >= 0; i--)
         {
@@ -562,6 +667,7 @@ sealed class SnowWorld
             if (f.Clump)
             {
                 f.Vy += Cfg.Gravity * dt;
+                f.Vx += wind * 0.4f * dt;          // the wind pushes flying clumps about too
                 f.Vx *= MathF.Max(0, 1 - 1.2f * dt);
                 f.X += f.Vx * dt;
                 f.Y += f.Vy * dt;
@@ -1665,6 +1771,62 @@ unsafe static class Render
         }
     }
 
+    /// Is this point covered by a window in front of the one at index `j`?
+    static bool HiddenInFront(SnowWorld w, int j, float x, float y)
+    {
+        for (int i = 0; i < j; i++) if (w.Order[i].Contains(x, y)) return true;
+        return false;
+    }
+
+    /// Strings of fairy lights: the drooping wire first, then a soft glow and a bright core for
+    /// every bulb. Back window to front, and anything behind a window in front of it is skipped.
+    public static void Lights(uint* buf, int bw, int bh, SnowWorld w, float s)
+    {
+        float t = w.Time;
+        float windSway = Cfg.Wind * 3.5f * (0.65f + 0.35f * MathF.Sin(t * 0.73f));
+        for (int j = w.Order.Count - 1; j >= 0; j--)
+        {
+            var win = w.Order[j];
+            if (!w.Lights.TryGetValue(win.Id, out var ls) || ls.Bulbs.Length == 0) continue;
+            float swing = ls.Swing(t), sway = ls.Sway(t) + windSway;
+
+            float xa = ls.L + Cfg.LightInset * 0.5f, xb = ls.L + ls.Width - Cfg.LightInset * 0.5f;
+            int px0 = Math.Max(0, (int)MathF.Floor(xa * s)), px1 = Math.Min(bw - 1, (int)MathF.Ceiling(xb * s));
+            float half = 0.65f * s;
+            for (int px = px0; px <= px1; px++)
+            {
+                float x = (px + 0.5f) / s;
+                if (x < xa || x > xb) continue;
+                float y = ls.WireY(x, swing);
+                if (HiddenInFront(w, j, x, y)) continue;
+                float cy = y * s;
+                int y0 = Math.Max(0, (int)MathF.Floor(cy - half)), y1 = Math.Min(bh - 1, (int)MathF.Ceiling(cy + half));
+                for (int py = y0; py <= y1; py++)
+                {
+                    float cov = Math.Clamp(half - MathF.Abs(py + 0.5f - cy) + 0.5f, 0, 1);
+                    if (cov > 0) Blend(buf + (long)py * bw + px, 0.8f * cov, 0.16f, 0.16f, 0.18f);
+                }
+            }
+
+            for (int i = 0; i < ls.Bulbs.Length; i++)
+            {
+                ref var b = ref ls.Bulbs[i];
+                float bx = ls.BulbX(i) + sway * (0.6f + 0.4f * MathF.Sin(b.Phase));
+                float by = ls.WireY(ls.BulbX(i), swing) + 4;
+                if (HiddenInFront(w, j, bx, by)) continue;
+                float rev = ls.Reveal(i, t);
+                if (rev <= 0) continue;
+                float k = 0.75f + 0.25f * MathF.Sin(t * b.Speed + b.Phase);
+                int c = b.Colour * 3;
+                float cr = LightString.Colours[c], cg = LightString.Colours[c + 1], cb = LightString.Colours[c + 2];
+                Glow(buf, bw, bh, bx * s, by * s, Cfg.BulbGlow * 0.5f * s, cr, cg, cb, 0.8f * k * rev);
+                FillCircle(buf, bw, bh, bx * s, by * s, Cfg.BulbCore * 0.5f * s,
+                           cr + (1 - cr) * 0.2f, cg + (1 - cg) * 0.2f, cb + (1 - cb) * 0.2f,
+                           (0.85f + 0.15f * k) * rev);
+            }
+        }
+    }
+
     static readonly List<Snowball> drawList = new();
 
     public static void World(uint* buf, int bw, int bh, SnowWorld w, float s)
@@ -1674,6 +1836,7 @@ unsafe static class Render
         foreach (var f in w.Flakes) if (!f.Clump && f.Layer < 2) Disc(buf, bw, bh, f.X * s, f.Y * s, f.Size * 1.1f * s, f.Alpha);
         foreach (var p in w.Piles.Values) Pile(buf, bw, bh, p, s);
         Pile(buf, bw, bh, w.Ground, s);
+        if (Cfg.Lights) Lights(buf, bw, bh, w, s);
 
         if (w.Balls.Count > 0)
         {
@@ -1741,7 +1904,17 @@ static unsafe class Program
     const uint MF_STRING = 0, MF_CHECKED = 8, MF_POPUP = 0x10, MF_SEPARATOR = 0x800;
     const uint TPM_RIGHTBUTTON = 0x2, TPM_RETURNCMD = 0x100;
     const int CMD_PAUSE = 1, CMD_CLEAR = 2, CMD_QUIT = 3, CMD_BALLS = 4, CMD_PLOW = 5, CMD_AUTOPLOW = 6,
-              CMD_LIGHT = 10, CMD_MEDIUM = 11, CMD_HEAVY = 12;
+              CMD_FAIRY = 7, CMD_LIGHT = 10, CMD_MEDIUM = 11, CMD_HEAVY = 12, CMD_WIND = 20;
+
+    // Wind settings, strongest from the left to strongest from the right
+    static readonly (float V, string Label)[] WindSteps =
+    {
+        (1.0f, "Gale from the left"),
+        (0.4f, "Breeze from the left"),
+        (0f, "Calm"),
+        (-0.4f, "Breeze from the right"),
+        (-1.0f, "Gale from the right"),
+    };
 
     // --- structs
     [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
@@ -2122,12 +2295,17 @@ static unsafe class Program
 
     static void ShowMenu()
     {
-        IntPtr menu = CreatePopupMenu(), amount = CreatePopupMenu();
+        IntPtr menu = CreatePopupMenu(), amount = CreatePopupMenu(), breeze = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING, (UIntPtr)CMD_PAUSE, paused ? "Resume snow" : "Pause snow");
         AppendMenuW(amount, MF_STRING | (Cfg.TargetFlakes == 120 ? MF_CHECKED : 0), (UIntPtr)CMD_LIGHT, "Light");
         AppendMenuW(amount, MF_STRING | (Cfg.TargetFlakes == 260 ? MF_CHECKED : 0), (UIntPtr)CMD_MEDIUM, "Medium");
         AppendMenuW(amount, MF_STRING | (Cfg.TargetFlakes == 500 ? MF_CHECKED : 0), (UIntPtr)CMD_HEAVY, "Heavy");
         AppendMenuW(menu, MF_POPUP, (UIntPtr)(ulong)amount.ToInt64(), "Snow amount");
+        for (int i = 0; i < WindSteps.Length; i++)
+            AppendMenuW(breeze, MF_STRING | (MathF.Abs(Cfg.Wind - WindSteps[i].V) < 0.01f ? MF_CHECKED : 0),
+                        (UIntPtr)(CMD_WIND + i), WindSteps[i].Label);
+        AppendMenuW(menu, MF_POPUP, (UIntPtr)(ulong)breeze.ToInt64(), "Wind");
+        AppendMenuW(menu, MF_STRING | (Cfg.Lights ? MF_CHECKED : 0), (UIntPtr)CMD_FAIRY, "Fairy lights");
         AppendMenuW(menu, MF_STRING | (Cfg.Snowballs ? MF_CHECKED : 0), (UIntPtr)CMD_BALLS, "Snowballs && snowmen");
         AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, null);
         AppendMenuW(menu, MF_STRING, (UIntPtr)CMD_PLOW, "Send the snowplough");
@@ -2156,11 +2334,15 @@ static unsafe class Program
                 break;
             case CMD_PLOW: world.SendPlow(); break;
             case CMD_AUTOPLOW: world.AutoPlow = !world.AutoPlow; break;
+            case CMD_FAIRY: Cfg.Lights = !Cfg.Lights; break;
             case CMD_LIGHT: Cfg.TargetFlakes = 120; break;
             case CMD_MEDIUM: Cfg.TargetFlakes = 260; break;
             case CMD_HEAVY: Cfg.TargetFlakes = 500; break;
             case CMD_CLEAR: world.ClearAll(); break;
             case CMD_QUIT: Quit(); break;
+            default:
+                if (cmd >= CMD_WIND && cmd < CMD_WIND + WindSteps.Length) Cfg.Wind = WindSteps[cmd - CMD_WIND].V;
+                break;
         }
     }
 
